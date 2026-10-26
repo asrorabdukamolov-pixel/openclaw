@@ -46,7 +46,7 @@ async function api(path, options = {}) {
 const state = {
   categories: [],
   products: [],
-  isAdmin: false,
+  role: null, // "admin" | "warehouse" | null
   query: "",
   orderType: load("em_order_type", null),
   cart: load("em_cart", {}),
@@ -70,6 +70,8 @@ const sum = (n) => Math.round(n).toLocaleString("ru-RU").replace(/[\s,]/g, " ");
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const byId = (id) => state.products.find((p) => p.id === id);
+const isAdmin = () => state.role === "admin";
+const isStaff = () => state.role !== null;
 const cover = (p) => p.images?.[0] || `/img/${p.category}.svg`;
 const haptic = (type = "light") => tg?.HapticFeedback?.impactOccurred(type);
 
@@ -150,7 +152,7 @@ function cardHtml(p) {
       <img src="${esc(cover(p))}" alt="" loading="lazy" />
       ${p.isNew ? '<span class="badge">Yangi</span>' : ""}
       ${pct ? `<span class="discount">-${pct}%</span>` : ""}
-      ${p.inStock ? `<button class="add ${qty ? "in" : ""}" data-add="${p.id}" aria-label="Savatga">${qty || "+"}</button>` : '<span class="out">Sotuvda yo\'q</span>'}
+      ${p.stock > 0 ? `<button class="add ${qty ? "in" : ""}" data-add="${p.id}" aria-label="Savatga">${qty || "+"}</button>` : '<span class="out">Sotuvda yo\'q</span>'}
     </div>
     <div class="price-row"><span class="price">${sum(p.price)}</span>${p.oldPrice ? `<span class="old">${sum(p.oldPrice)}</span>` : ""}</div>
     <div class="name">${esc(p.name)}</div>
@@ -204,8 +206,14 @@ function stepTab(dir) {
 
 // ---------- cart ----------
 function setQty(id, qty) {
+  const stock = byId(id)?.stock ?? 0;
+  if (qty > stock) {
+    tg?.HapticFeedback?.notificationOccurred("warning");
+    toast(`Omborda faqat ${stock} ta bor`);
+    qty = stock;
+  }
   if (qty <= 0) delete state.cart[id];
-  else state.cart[id] = Math.min(99, qty);
+  else state.cart[id] = qty;
   save("em_cart", state.cart);
   renderCatalog();
   renderCartFab();
@@ -214,7 +222,8 @@ function setQty(id, qty) {
 function cartLines() {
   return Object.entries(state.cart)
     .map(([id, qty]) => ({ p: byId(id), qty }))
-    .filter((l) => l.p && l.p.inStock);
+    .filter((l) => l.p && l.p.stock > 0)
+    .map((l) => ({ ...l, qty: Math.min(l.qty, l.p.stock) }));
 }
 
 function renderCartFab() {
@@ -276,12 +285,12 @@ function productSheet(id) {
       <dl class="specs">
         ${p.size ? `<dt>O'lcham</dt><dd>${esc(p.size)}</dd>` : ""}
         ${p.material ? `<dt>Material</dt><dd>${esc(p.material)}</dd>` : ""}
-        <dt>Holati</dt><dd>${p.inStock ? "Sotuvda bor" : "Sotuvda yo'q"}</dd>
+        <dt>Holati</dt><dd>${stockLabel(p)}</dd>
       </dl>
       ${p.description ? `<p class="desc">${esc(p.description)}</p>` : ""}
       <div class="buy-row">
         ${
-          !p.inStock
+          p.stock <= 0
             ? '<button class="btn" disabled>Sotuvda yo\'q</button>'
             : qty
               ? `<div class="stepper"><button data-q="-1">−</button><span>${qty}</span><button data-q="1">+</button></div>
@@ -289,7 +298,14 @@ function productSheet(id) {
               : '<button class="btn" data-q="1">Savatga qo\'shish</button>'
         }
       </div>
-      ${state.isAdmin ? `<div style="margin-top:12px"><button class="btn btn--ghost" data-edit="${p.id}">✏️ Tahrirlash</button></div>` : ""}`;
+      ${
+        isStaff()
+          ? `<div class="stack" style="margin-top:12px">
+              <button class="btn btn--ghost" data-stock="${p.id}">📦 Ombor: ${p.stock} ta</button>
+              ${isAdmin() ? `<button class="btn btn--ghost" data-edit="${p.id}">✏️ Tahrirlash</button>` : ""}
+            </div>`
+          : ""
+      }`;
     body.onclick = (e) => {
       const q = e.target.closest("[data-q]");
       if (q) {
@@ -300,8 +316,16 @@ function productSheet(id) {
       if (e.target.closest("[data-go=cart]")) openSheet(cartSheet);
       const edit = e.target.closest("[data-edit]");
       if (edit) openSheet(productForm(edit.dataset.edit));
+      const stock = e.target.closest("[data-stock]");
+      if (stock) openSheet(stockSheet(stock.dataset.stock));
     };
   };
+}
+
+function stockLabel(p) {
+  if (p.stock <= 0) return "Sotuvda yo'q";
+  if (p.stock <= 3) return `Sotuvda bor · faqat ${p.stock} ta qoldi`;
+  return "Sotuvda bor";
 }
 
 function cartSheet(body) {
@@ -381,7 +405,9 @@ function checkoutSheet(body) {
     } catch (err) {
       tg?.HapticFeedback?.notificationOccurred("error");
       toast(err.message);
-      btn.disabled = false;
+      // Stock may have changed since the catalog loaded; refresh so the cart clamps to it.
+      await reload().catch(() => {});
+      drawSheet();
     }
   };
 }
@@ -426,7 +452,7 @@ function adminSheet(body) {
       .map(
         (p) => `<button class="admin-item" data-edit="${p.id}">
           <img src="${esc(cover(p))}" alt="" />
-          <div><div class="line-name">${esc(p.name)}</div><small>${sum(p.price)} so'm ${p.inStock ? "" : "· sotuvda yo'q"}</small></div>
+          <div><div class="line-name">${esc(p.name)}</div><small>${sum(p.price)} so'm · omborda ${p.stock} ta</small></div>
           <span class="chip">${catName[p.category] || p.category}</span>
         </button>`,
       )
@@ -484,7 +510,11 @@ function productForm(id) {
         </div>
         <label class="field">Tavsif<textarea name="description" rows="4">${esc(p?.description)}</textarea></label>
         <label class="check"><input type="checkbox" name="isNew" ${p?.isNew ? "checked" : ""} /> "Yangi" belgisi</label>
-        <label class="check"><input type="checkbox" name="inStock" ${p?.inStock ?? true ? "checked" : ""} /> Sotuvda bor</label>
+        ${
+          p
+            ? `<p class="field">Omborda: <b>${p.stock} ta</b>. Qoldiq "📦 Ombor" bo'limida kirim/chiqim orqali o'zgaradi.</p>`
+            : `<label class="field">Boshlang'ich qoldiq (dona)<input name="stock" type="number" inputmode="numeric" min="0" value="0" /></label>`
+        }
         <div class="stack">
           <button class="btn" type="submit">Saqlash</button>
           ${p ? '<button class="btn btn--danger" type="button" data-del>O\'chirish</button>' : ""}
@@ -547,7 +577,7 @@ function productForm(id) {
         material: f.get("material"),
         description: f.get("description"),
         isNew: f.has("isNew"),
-        inStock: f.has("inStock"),
+        stock: Number(f.get("stock") || 0),
         images,
       };
       const btn = e.target.querySelector("button[type=submit]");
@@ -558,6 +588,119 @@ function productForm(id) {
         tg?.HapticFeedback?.notificationOccurred("success");
         toast("Saqlandi");
         back();
+      } catch (err) {
+        toast(err.message);
+        btn.disabled = false;
+      }
+    };
+  };
+}
+
+// ---------- warehouse ----------
+const MOVE_LABEL = { in: "Kirim", out: "Chiqim", sale: "Sotuv" };
+const when = (ts) =>
+  new Date(ts).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+
+function stockChip(n) {
+  const level = n <= 0 ? "zero" : n <= 3 ? "low" : "ok";
+  return `<span class="stock stock--${level}">${n} ta</span>`;
+}
+
+function movementsHtml(list, withName) {
+  if (!list.length) return '<p class="empty">Hali harakat yo\'q</p>';
+  return list
+    .map(
+      (m) => `<div class="move">
+        <span class="move-qty move-qty--${m.type === "in" ? "in" : "out"}">${m.type === "in" ? "+" : "−"}${m.qty}</span>
+        <div>
+          <div class="line-name">${MOVE_LABEL[m.type]}${withName ? ` · ${esc(m.productName)}` : ""}</div>
+          <small>${when(m.at)} · ${esc(m.by)}${m.note ? ` · ${esc(m.note)}` : ""}</small>
+        </div>
+        <small>qoldiq ${m.balance}</small>
+      </div>`,
+    )
+    .join("");
+}
+
+function warehouseSheet(body) {
+  const empty = state.products.filter((p) => p.stock <= 0).length;
+  const low = state.products.filter((p) => p.stock > 0 && p.stock <= 3).length;
+  body.innerHTML = `<h3>Ombor</h3>
+    <div class="stat-row">
+      <div><b>${state.products.reduce((n, p) => n + p.stock, 0)}</b><small>jami dona</small></div>
+      <div><b>${low}</b><small>kam qolgan</small></div>
+      <div><b>${empty}</b><small>tugagan</small></div>
+    </div>
+    <label class="field"><input id="stockSearch" type="search" placeholder="Mahsulotni qidirish" /></label>
+    <div id="stockList"></div>
+    <h4 class="sub">Oxirgi harakatlar</h4>
+    <div id="stockLog"><p class="empty">Yuklanmoqda…</p></div>`;
+  const list = body.querySelector("#stockList");
+  const draw = (q = "") => {
+    list.innerHTML = [...state.products]
+      .filter((p) => p.name.toLowerCase().includes(q.toLowerCase()))
+      .sort((a, b) => a.stock - b.stock)
+      .map(
+        (p) => `<button class="admin-item" data-stock="${p.id}">
+          <img src="${esc(cover(p))}" alt="" />
+          <div><div class="line-name">${esc(p.name)}</div><small>${sum(p.price)} so'm</small></div>
+          ${stockChip(p.stock)}
+        </button>`,
+      )
+      .join("");
+  };
+  draw();
+  body.querySelector("#stockSearch").oninput = (e) => draw(e.target.value);
+  api("/api/stock")
+    .then((log) => (body.querySelector("#stockLog").innerHTML = movementsHtml(log.slice(0, 30), true)))
+    .catch((err) => (body.querySelector("#stockLog").innerHTML = `<p class="empty">${esc(err.message)}</p>`));
+  body.onclick = (e) => {
+    const item = e.target.closest("[data-stock]");
+    if (item) openSheet(stockSheet(item.dataset.stock));
+  };
+}
+
+function stockSheet(id) {
+  let type = "in";
+  return (body) => {
+    const p = byId(id);
+    if (!p) return back();
+    body.innerHTML = `<h3>${esc(p.name)}</h3>
+      <div class="stock-now">Omborda <b>${p.stock}</b> ta ${p.stock <= 0 ? "· saytda sotilmaydi" : ""}</div>
+      <div class="seg">
+        <button type="button" class="${type === "in" ? "on" : ""}" data-type="in">＋ Kirim</button>
+        <button type="button" class="${type === "out" ? "on" : ""}" data-type="out">− Chiqim</button>
+      </div>
+      <form id="stockForm">
+        <label class="field">Miqdor (dona)<input name="qty" type="number" inputmode="numeric" min="1" ${type === "out" ? `max="${p.stock}"` : ""} required /></label>
+        <label class="field">Izoh<input name="note" placeholder="${type === "in" ? "Sexdan keldi, partiya №…" : "Brak, ko'rgazmaga, qaytarildi…"}" /></label>
+        <button class="btn" type="submit">${type === "in" ? "Kirimni saqlash" : "Chiqimni saqlash"}</button>
+      </form>
+      <h4 class="sub">Harakatlar tarixi</h4>
+      <div id="moveLog"><p class="empty">Yuklanmoqda…</p></div>`;
+    api(`/api/stock?productId=${encodeURIComponent(p.id)}`)
+      .then((log) => (body.querySelector("#moveLog").innerHTML = movementsHtml(log, false)))
+      .catch((err) => (body.querySelector("#moveLog").innerHTML = `<p class="empty">${esc(err.message)}</p>`));
+    body.onclick = (e) => {
+      const seg = e.target.closest("[data-type]");
+      if (!seg) return;
+      type = seg.dataset.type;
+      drawSheet();
+    };
+    body.querySelector("form").onsubmit = async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      const btn = e.target.querySelector("button[type=submit]");
+      btn.disabled = true;
+      try {
+        await api("/api/stock", {
+          method: "POST",
+          body: { productId: p.id, type, qty: Number(f.get("qty")), note: f.get("note") },
+        });
+        await reload();
+        tg?.HapticFeedback?.notificationOccurred("success");
+        toast(type === "in" ? "Kirim saqlandi" : "Chiqim saqlandi");
+        drawSheet();
       } catch (err) {
         toast(err.message);
         btn.disabled = false;
@@ -577,7 +720,8 @@ function openDrawer() {
     ["cart", "🛒  Savat"],
     ["type", "🚚  Buyurtma turi"],
     ...state.categories.map((c) => [`cat:${c.id}`, c.name]),
-    ...(state.isAdmin ? [["admin", "⚙️  Mahsulotlarni boshqarish"]] : []),
+    ...(isStaff() ? [["stock", "📦  Ombor"]] : []),
+    ...(isAdmin() ? [["admin", "⚙️  Mahsulotlarni boshqarish"]] : []),
   ];
   $("#drawerNav").innerHTML = items.map(([k, label]) => `<button data-k="${k}">${label}</button>`).join("");
   $("#drawer").hidden = false;
@@ -598,6 +742,7 @@ $("#drawerNav").onclick = (e) => {
   if (k === "cart") openSheet(cartSheet);
   if (k === "type") openSheet(orderTypeSheet);
   if (k === "admin") openSheet(adminSheet);
+  if (k === "stock") openSheet(warehouseSheet);
   if (k.startsWith("cat:")) document.querySelector(`[data-tab="${k.slice(4)}"]`)?.click();
 };
 
@@ -631,7 +776,7 @@ $("#search").oninput = (e) => {
 $("#cartFab").onclick = () => openSheet(cartSheet);
 $("#orderTypeBtn").onclick = () => openSheet(orderTypeSheet);
 $("#menuBtn").onclick = openDrawer;
-$("#avatarBtn").onclick = () => (state.isAdmin ? openSheet(adminSheet) : openSheet(cartSheet));
+$("#avatarBtn").onclick = () => openSheet(isAdmin() ? adminSheet : isStaff() ? warehouseSheet : cartSheet);
 $("#backdrop").onclick = closeAll;
 tg?.BackButton?.onClick(back);
 window.addEventListener("scroll", onScroll, { passive: true });
@@ -649,7 +794,7 @@ async function reload() {
   try {
     const config = await api("/api/config");
     state.categories = config.categories;
-    state.isAdmin = config.isAdmin;
+    state.role = config.role;
     await reload();
   } catch (err) {
     toast(err.message);

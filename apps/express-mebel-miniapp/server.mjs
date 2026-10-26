@@ -5,7 +5,8 @@
 //   PORT          HTTP port (default 3000)
 //   BOT_TOKEN     Telegram bot token from @BotFather (enables bot + initData auth)
 //   WEBAPP_URL    Public HTTPS URL of this server (shown as Web App button)
-//   ADMIN_IDS     Comma-separated Telegram user ids allowed to manage products
+//   ADMIN_IDS     Comma-separated Telegram user ids allowed to manage products and stock
+//   WAREHOUSE_IDS Comma-separated Telegram user ids of warehouse staff (stock in/out only)
 //   ADMIN_TOKEN   Optional password for managing products from a normal browser
 //   ORDERS_CHAT_ID Chat id that receives new orders (default: first ADMIN_IDS entry)
 
@@ -21,15 +22,19 @@ const PUBLIC_DIR = join(ROOT, "public");
 const DATA_DIR = process.env.DATA_DIR || join(ROOT, "data");
 const UPLOAD_DIR = join(DATA_DIR, "uploads");
 const DB_FILE = join(DATA_DIR, "products.json");
+const STOCK_FILE = join(DATA_DIR, "stock-movements.json");
 const SEED_FILE = join(ROOT, "seed-products.json");
 
 const PORT = Number(process.env.PORT || 3000);
 const BOT_TOKEN = process.env.BOT_TOKEN || "";
 const WEBAPP_URL = process.env.WEBAPP_URL || "";
-const ADMIN_IDS = (process.env.ADMIN_IDS || "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
+const idList = (value) =>
+  (value || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+const ADMIN_IDS = idList(process.env.ADMIN_IDS);
+const WAREHOUSE_IDS = idList(process.env.WAREHOUSE_IDS);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 const ORDERS_CHAT_ID = process.env.ORDERS_CHAT_ID || ADMIN_IDS[0] || "";
 
@@ -64,14 +69,43 @@ mkdirSync(UPLOAD_DIR, { recursive: true });
 if (!existsSync(DB_FILE)) {
   writeFileSync(DB_FILE, existsSync(SEED_FILE) ? readFileSync(SEED_FILE) : "[]");
 }
+if (!existsSync(STOCK_FILE)) writeFileSync(STOCK_FILE, "[]");
 let products = JSON.parse(readFileSync(DB_FILE, "utf8"));
+let movements = JSON.parse(readFileSync(STOCK_FILE, "utf8"));
 let saving = Promise.resolve();
 
+// Writes are queued so products and the stock journal land on disk in mutation order.
 function persist() {
-  const snapshot = JSON.stringify(products, null, 2);
-  saving = saving.then(() => writeFile(DB_FILE, snapshot));
+  const productsSnapshot = JSON.stringify(products, null, 2);
+  const movementsSnapshot = JSON.stringify(movements, null, 2);
+  saving = saving.then(() =>
+    Promise.all([writeFile(DB_FILE, productsSnapshot), writeFile(STOCK_FILE, movementsSnapshot)]),
+  );
   return saving;
 }
+
+// Stock types: "in" (kirim), "out" (chiqim), "sale" (buyurtma). Callers validate before calling;
+// the check and the decrement run synchronously so two orders cannot oversell the last unit.
+function moveStock(product, type, qty, note, by) {
+  product.stock += type === "in" ? qty : -qty;
+  product.updatedAt = Date.now();
+  const movement = {
+    id: randomUUID(),
+    productId: product.id,
+    productName: product.name,
+    type,
+    qty,
+    balance: product.stock,
+    note: String(note || "").slice(0, 200),
+    by: by || "—",
+    at: Date.now(),
+  };
+  movements.push(movement);
+  return movement;
+}
+
+const staffName = (user) =>
+  user ? [user.first_name, user.last_name].filter(Boolean).join(" ") || String(user.id) : "Admin";
 
 // ---------- validation ----------
 
@@ -100,7 +134,8 @@ function cleanProduct(input, existing = {}) {
     size: String(input.size ?? existing.size ?? "").slice(0, 120),
     material: String(input.material ?? existing.material ?? "").slice(0, 120),
     isNew: Boolean(input.isNew ?? existing.isNew),
-    inStock: input.inStock === undefined ? (existing.inStock ?? true) : Boolean(input.inStock),
+    // Stock changes only through the warehouse journal; new products start at 0.
+    stock: existing.stock ?? 0,
     images,
     createdAt: existing.createdAt || Date.now(),
     updatedAt: Date.now(),
@@ -152,12 +187,13 @@ function authenticate(req) {
   const isAdmin =
     (user && ADMIN_IDS.includes(String(user.id))) ||
     Boolean(ADMIN_TOKEN && typeof token === "string" && sameSecret(token, ADMIN_TOKEN));
-  return { user, isAdmin };
+  const role = isAdmin ? "admin" : user && WAREHOUSE_IDS.includes(String(user.id)) ? "warehouse" : null;
+  return { user, role };
 }
 
-function requireAdmin(req) {
+function requireRole(req, ...roles) {
   const auth = authenticate(req);
-  if (!auth.isAdmin) throw new HttpError(403, "Ruxsat yo'q");
+  if (!roles.includes(auth.role)) throw new HttpError(403, "Ruxsat yo'q");
   return auth;
 }
 
@@ -255,8 +291,8 @@ async function handleApi(req, res, url) {
   const method = req.method;
 
   if (pathname === "/api/config" && method === "GET") {
-    const { user, isAdmin } = authenticate(req);
-    return send(res, 200, { categories: CATEGORIES, isAdmin, user });
+    const { user, role } = authenticate(req);
+    return send(res, 200, { categories: CATEGORIES, role, user });
   }
 
   if (pathname === "/api/products" && method === "GET") {
@@ -265,9 +301,12 @@ async function handleApi(req, res, url) {
   }
 
   if (pathname === "/api/products" && method === "POST") {
-    requireAdmin(req);
-    const product = cleanProduct(await readBody(req));
+    const { user } = requireRole(req, "admin");
+    const body = await readBody(req);
+    const product = cleanProduct(body);
     products.push(product);
+    const initial = Math.floor(Number(body.stock));
+    if (initial > 0) moveStock(product, "in", Math.min(initial, 100000), "Boshlang'ich qoldiq", staffName(user));
     await persist();
     return send(res, 201, product);
   }
@@ -277,7 +316,7 @@ async function handleApi(req, res, url) {
     const index = products.findIndex((p) => p.id === match[1]);
     if (index === -1) throw new HttpError(404, "Mahsulot topilmadi");
     if (method === "GET") return send(res, 200, products[index]);
-    requireAdmin(req);
+    requireRole(req, "admin");
     if (method === "PUT") {
       products[index] = cleanProduct(await readBody(req), products[index]);
       await persist();
@@ -291,7 +330,7 @@ async function handleApi(req, res, url) {
   }
 
   if (pathname === "/api/upload" && method === "POST") {
-    requireAdmin(req);
+    requireRole(req, "admin");
     const { dataUrl } = await readBody(req);
     const m = /^data:image\/(jpeg|png|webp);base64,(.+)$/.exec(String(dataUrl || ""));
     if (!m) throw new HttpError(400, "Faqat JPG, PNG yoki WEBP rasm");
@@ -299,6 +338,29 @@ async function handleApi(req, res, url) {
     const name = `${randomUUID()}.${ext}`;
     await writeFile(join(UPLOAD_DIR, name), Buffer.from(m[2], "base64"));
     return send(res, 201, { url: `/uploads/${name}` });
+  }
+
+  if (pathname === "/api/stock" && method === "GET") {
+    requireRole(req, "admin", "warehouse");
+    const productId = url.searchParams.get("productId");
+    const list = productId ? movements.filter((m) => m.productId === productId) : movements;
+    return send(res, 200, list.slice(-100).reverse());
+  }
+
+  if (pathname === "/api/stock" && method === "POST") {
+    const { user } = requireRole(req, "admin", "warehouse");
+    const body = await readBody(req);
+    const product = products.find((p) => p.id === body.productId);
+    if (!product) throw new HttpError(404, "Mahsulot topilmadi");
+    if (body.type !== "in" && body.type !== "out") throw new HttpError(400, "Amal turi noto'g'ri");
+    const qty = Number(body.qty);
+    if (!Number.isInteger(qty) || qty <= 0 || qty > 100000) throw new HttpError(400, "Miqdor noto'g'ri");
+    if (body.type === "out" && qty > product.stock) {
+      throw new HttpError(400, `Omborda faqat ${product.stock} ta bor`);
+    }
+    const movement = moveStock(product, body.type, qty, body.note, staffName(user));
+    await persist();
+    return send(res, 201, { product, movement });
   }
 
   if (pathname === "/api/orders" && method === "POST") {
@@ -310,6 +372,18 @@ async function handleApi(req, res, url) {
     if (!items.length) throw new HttpError(400, "Savat bo'sh");
     const phone = String(body.phone || "").trim();
     if (!/^\+?[\d\s()-]{7,20}$/.test(phone)) throw new HttpError(400, "Telefon raqam noto'g'ri");
+    const short = items.find((it) => it.qty > it.product.stock);
+    if (short) {
+      throw new HttpError(
+        409,
+        short.product.stock
+          ? `«${short.product.name}» omborda faqat ${short.product.stock} ta qoldi`
+          : `«${short.product.name}» tugadi`,
+      );
+    }
+    const buyer = user ? staffName(user) : String(body.name || "Mijoz").slice(0, 60);
+    for (const it of items) moveStock(it.product, "sale", it.qty, "Buyurtma", buyer);
+    await persist();
     const total = items.reduce((sum, it) => sum + it.product.price * it.qty, 0);
     const lines = items.map(
       (it) => `• ${escapeHtml(it.product.name)} × ${it.qty} = ${formatSum(it.product.price * it.qty)}`,
@@ -329,6 +403,13 @@ async function handleApi(req, res, url) {
       body.address ? `<b>Manzil:</b> ${escapeHtml(String(body.address).slice(0, 300))}` : "",
       body.comment ? `<b>Izoh:</b> ${escapeHtml(String(body.comment).slice(0, 500))}` : "",
       `<b>Telegram:</b> ${who}`,
+      ...items
+        .filter((it) => it.product.stock <= 3)
+        .map((it) =>
+          it.product.stock
+            ? `⚠️ «${escapeHtml(it.product.name)}» omborda ${it.product.stock} ta qoldi`
+            : `⛔️ «${escapeHtml(it.product.name)}» tugadi — saytda sotuvdan chiqdi`,
+        ),
     ]
       .filter((l) => l !== "")
       .join("\n");
