@@ -19,6 +19,11 @@ Bo'limlar: **Oshxona, Shkaf, Tumba, Parta, Pufik, Krovat**.
 - FeedUp uslubidagi bosh sahifa: profil rasmi, "Buyurtma turi", menyu, bannerlar, qidiruv, yopishqoq bo'lim tablari, 2 ustunli mahsulot kartalari ("Yangi" belgisi, chegirma %, eski narx, `+` tugmasi).
 - Mahsulot sahifasi (bir nechta rasm, o'lcham, material, tavsif), savat, buyurtma (yetkazib berish / olib ketish).
 - Buyurtma admin chatiga Telegram bot orqali yuboriladi, mijozga tasdiq xabari boradi.
+- **Avtomatik telefon va manzil**: "📱 Telegram raqamimni yuborish" (Telegram `requestContact`, Bot API 6.9+) va
+  "📍 Joylashuvimni aniqlash" (Telegram `LocationManager`, Bot API 8.0+; brauzerda — geolocation).
+  Koordinata OpenStreetMap Nominatim orqali manzil matniga aylanadi (`/api/geocode`, 1 so'rov/soniya cheklovi bilan),
+  mijoz uni tahrirlab, podyezd/qavatni qo'shadi. Admin chatiga buyurtma bilan birga Google/Yandex xarita havolalari
+  va Telegram lokatsiya pini keladi — kuryer bir bosishda navigatsiyani ochadi.
 - **Admin panel**: mahsulot qo'shish / tahrirlash / o'chirish, telefondan rasm yuklash (avtomatik siqiladi), narx, eski narx, "Yangi" belgisi.
 - **Ombor (tayyor mahsulot ombori)**: har bir mahsulotning qoldig'i, kirim / chiqim, harakatlar tarixi (kim, qachon, nechta, izoh).
   Buyurtma tushganda qoldiq avtomatik kamayadi; qoldiq 0 bo'lsa mahsulot saytda "Sotuvda yo'q" bo'ladi va uni sotib olib bo'lmaydi.
@@ -86,6 +91,7 @@ Birinchi ishga tushishda namunaviy mahsulotlar `seed-products.json` dan olinadi;
 | POST | `/api/upload` | admin (`{ dataUrl }`) |
 | GET | `/api/stock?productId=` | admin, ombor |
 | POST | `/api/stock` | admin, ombor (`{ productId, type: "in" \| "out", qty, note }`) |
+| GET | `/api/geocode?lat=&lon=` | hamma |
 | POST | `/api/orders` | hamma (qoldiqdan ko'p bo'lsa 409) |
 
 Admin tekshiruvi Telegram `initData` imzosi (bot token bilan HMAC) yoki `x-admin-token` sarlavhasi orqali.

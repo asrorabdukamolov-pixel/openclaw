@@ -1019,3 +1019,48 @@ select {
 .move-qty--out {
   color: #c62828;
 }
+
+/* ---------- checkout autofill ---------- */
+.auto-btn {
+  justify-self: start;
+  padding: 9px 14px;
+  border-radius: 12px;
+  background: var(--teal-soft);
+  color: var(--teal-dark);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.auto-btn--main {
+  justify-self: stretch;
+  height: 48px;
+  font-size: 15px;
+}
+
+.auto-btn:disabled {
+  opacity: 0.6;
+}
+
+.loc-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--graphite);
+}
+
+.loc-chip a {
+  color: var(--teal-dark);
+}
+
+.loc-chip button {
+  margin-left: auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--card);
+}
+
+.hint {
+  font-size: 12px;
+}

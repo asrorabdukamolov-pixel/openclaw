@@ -248,6 +248,41 @@ async function botLoop() {
   }
 }
 
+// ---------- reverse geocoding ----------
+
+// OpenStreetMap Nominatim usage policy: identify the app and stay at <= 1 request/second.
+// https://operations.osmfoundation.org/policies/nominatim/
+let geocodeGate = Promise.resolve();
+
+function reverseGeocode(lat, lon) {
+  const run = geocodeGate.then(async () => {
+    const url = new URL("https://nominatim.openstreetmap.org/reverse");
+    url.search = new URLSearchParams({ format: "jsonv2", lat, lon, zoom: "18", addressdetails: "1", "accept-language": "uz" });
+    const res = await fetch(url, { headers: { "user-agent": "ExpressMebelMiniApp/1.0" }, signal: AbortSignal.timeout(8000) });
+    if (!res.ok) throw new Error(`geocode ${res.status}`);
+    const { address = {}, display_name: full = "" } = await res.json();
+    const parts = [
+      address.city || address.town || address.village || address.county || address.state,
+      address.city_district || address.suburb || address.neighbourhood,
+      address.road,
+      address.house_number,
+    ].filter(Boolean);
+    return parts.length >= 2 ? parts.join(", ") : full;
+  });
+  geocodeGate = run.catch(() => {}).then(() => new Promise((r) => setTimeout(r, 1100)));
+  return run;
+}
+
+function parseLocation(value) {
+  if (!value) return null;
+  const lat = Number(value.lat);
+  const lon = Number(value.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+    throw new HttpError(400, "Joylashuv noto'g'ri");
+  }
+  return { lat: Math.round(lat * 1e6) / 1e6, lon: Math.round(lon * 1e6) / 1e6 };
+}
+
 // ---------- HTTP ----------
 
 async function readBody(req, limit = 12 * 1024 * 1024) {
@@ -340,6 +375,17 @@ async function handleApi(req, res, url) {
     return send(res, 201, { url: `/uploads/${name}` });
   }
 
+  if (pathname === "/api/geocode" && method === "GET") {
+    const loc = parseLocation({ lat: url.searchParams.get("lat"), lon: url.searchParams.get("lon") });
+    if (!loc) throw new HttpError(400, "Joylashuv yo'q");
+    try {
+      return send(res, 200, { address: await reverseGeocode(loc.lat, loc.lon) });
+    } catch (err) {
+      console.error("[geocode]", err.message);
+      throw new HttpError(502, "Manzilni aniqlab bo'lmadi, qo'lda yozing");
+    }
+  }
+
   if (pathname === "/api/stock" && method === "GET") {
     requireRole(req, "admin", "warehouse");
     const productId = url.searchParams.get("productId");
@@ -371,6 +417,7 @@ async function handleApi(req, res, url) {
       .filter((it) => it.product);
     if (!items.length) throw new HttpError(400, "Savat bo'sh");
     const phone = String(body.phone || "").trim();
+    const location = body.orderType === "pickup" ? null : parseLocation(body.location);
     if (!/^\+?[\d\s()-]{7,20}$/.test(phone)) throw new HttpError(400, "Telefon raqam noto'g'ri");
     const short = items.find((it) => it.qty > it.product.stock);
     if (short) {
@@ -401,6 +448,9 @@ async function handleApi(req, res, url) {
       `<b>Ism:</b> ${escapeHtml(String(body.name || "").slice(0, 100))}`,
       `<b>Telefon:</b> ${escapeHtml(phone)}`,
       body.address ? `<b>Manzil:</b> ${escapeHtml(String(body.address).slice(0, 300))}` : "",
+      location
+        ? `<b>Xarita:</b> <a href="https://maps.google.com/?q=${location.lat},${location.lon}">Google</a> · <a href="https://yandex.uz/maps/?pt=${location.lon},${location.lat}&z=17&l=map">Yandex</a>`
+        : "",
       body.comment ? `<b>Izoh:</b> ${escapeHtml(String(body.comment).slice(0, 500))}` : "",
       `<b>Telegram:</b> ${who}`,
       ...items
@@ -413,7 +463,18 @@ async function handleApi(req, res, url) {
     ]
       .filter((l) => l !== "")
       .join("\n");
-    if (ORDERS_CHAT_ID) await tg("sendMessage", { chat_id: ORDERS_CHAT_ID, text, parse_mode: "HTML" });
+    if (ORDERS_CHAT_ID) {
+      const sent = await tg("sendMessage", { chat_id: ORDERS_CHAT_ID, text, parse_mode: "HTML", link_preview_options: { is_disabled: true } });
+      // A native location pin lets the courier open navigation straight from the chat.
+      if (location) {
+        await tg("sendLocation", {
+          chat_id: ORDERS_CHAT_ID,
+          latitude: location.lat,
+          longitude: location.lon,
+          reply_parameters: { message_id: sent.message_id },
+        });
+      }
+    }
     else console.log("[order]\n" + text.replace(/<[^>]+>/g, ""));
     if (user) {
       await tg("sendMessage", {

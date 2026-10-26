@@ -359,46 +359,155 @@ function cartSheet(body) {
   };
 }
 
-function checkoutSheet(body) {
+// Checkout fields live here so switching delivery/pickup (a re-render) keeps what was typed.
+let checkout = null;
+
+function checkoutDraft() {
+  if (checkout) return checkout;
   const user = tg?.initDataUnsafe?.user;
-  const draft = load("em_checkout", {});
+  const saved = load("em_checkout", {});
+  checkout = {
+    name: saved.name || [user?.first_name, user?.last_name].filter(Boolean).join(" "),
+    phone: saved.phone || "+998 ",
+    address: saved.address || "",
+    comment: "",
+    location: saved.location || null,
+  };
+  return checkout;
+}
+
+// Telegram contact sharing (Bot API 6.9+): one tap instead of typing the number.
+function requestPhone() {
+  return new Promise((resolve, reject) => {
+    tg.requestContact((shared, res) => {
+      const phone = shared && res?.status === "sent" ? res.responseUnsafe?.contact?.phone_number : null;
+      phone ? resolve(phone.startsWith("+") ? phone : `+${phone}`) : reject(new Error("Raqam yuborilmadi"));
+    });
+  });
+}
+
+// Telegram LocationManager (Bot API 8.0+) asks inside Telegram; browsers fall back to geolocation.
+function requestLocation() {
+  const lm = tg?.LocationManager;
+  if (lm && tg.isVersionAtLeast?.("8.0")) {
+    return new Promise((resolve, reject) => {
+      const get = () =>
+        lm.getLocation((data) => {
+          if (data) return resolve({ lat: data.latitude, lon: data.longitude });
+          if (lm.isAccessRequested && !lm.isAccessGranted) {
+            tg.showConfirm?.("Joylashuvga ruxsat berilmagan. Sozlamalarni ochaymi?", (ok) => ok && lm.openSettings());
+          }
+          reject(new Error("Joylashuvni aniqlab bo'lmadi"));
+        });
+      lm.isInited ? get() : lm.init(() => (lm.isLocationAvailable ? get() : reject(new Error("Qurilmada joylashuv o'chiq"))));
+    });
+  }
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) return reject(new Error("Qurilmada joylashuv o'chiq"));
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+      () => reject(new Error("Joylashuvga ruxsat berilmadi")),
+      { enableHighAccuracy: true, timeout: 15000 },
+    );
+  });
+}
+
+const mapLink = (loc) => `https://maps.google.com/?q=${loc.lat},${loc.lon}`;
+
+function checkoutSheet(body) {
+  const d = checkoutDraft();
   const type = state.orderType || "delivery";
   const total = cartLines().reduce((n, l) => n + l.qty * l.p.price, 0);
+  const canShareContact = Boolean(tg?.requestContact && tg.isVersionAtLeast?.("6.9"));
   body.innerHTML = `<h3>Buyurtmani rasmiylashtirish</h3>
     <div class="seg">
-      <button class="${type === "delivery" ? "on" : ""}" data-type="delivery">Yetkazib berish</button>
-      <button class="${type === "pickup" ? "on" : ""}" data-type="pickup">Olib ketish</button>
+      <button type="button" class="${type === "delivery" ? "on" : ""}" data-type="delivery">Yetkazib berish</button>
+      <button type="button" class="${type === "pickup" ? "on" : ""}" data-type="pickup">Olib ketish</button>
     </div>
     <form id="orderForm">
-      <label class="field">Ism<input name="name" required value="${esc(draft.name || [user?.first_name, user?.last_name].filter(Boolean).join(" "))}" /></label>
-      <label class="field">Telefon raqam<input name="phone" type="tel" required placeholder="+998 90 123 45 67" value="${esc(draft.phone || "+998 ")}" /></label>
-      ${type === "delivery" ? `<label class="field">Manzil<textarea name="address" rows="2" required placeholder="Shahar, ko'cha, uy">${esc(draft.address || "")}</textarea></label>` : ""}
-      <label class="field">Izoh<textarea name="comment" rows="2" placeholder="Qavat, lift, qulay vaqt..."></textarea></label>
+      <label class="field">Ism<input name="name" required value="${esc(d.name)}" /></label>
+      <div class="field">
+        <label for="phoneInput">Telefon raqam</label>
+        <input id="phoneInput" name="phone" type="tel" required placeholder="+998 90 123 45 67" value="${esc(d.phone)}" />
+        ${canShareContact ? '<button type="button" class="auto-btn" data-auto="phone">📱 Telegram raqamimni yuborish</button>' : ""}
+      </div>
+      ${
+        type === "delivery"
+          ? `<div class="field">
+              <label for="addressInput">Manzil</label>
+              <button type="button" class="auto-btn auto-btn--main" data-auto="location">📍 Joylashuvimni aniqlash</button>
+              ${
+                d.location
+                  ? `<div class="loc-chip">✅ Joylashuv biriktirildi · <a href="${mapLink(d.location)}" target="_blank" rel="noopener">xaritada ko'rish</a> <button type="button" data-auto="clear-location" aria-label="Olib tashlash">✕</button></div>`
+                  : ""
+              }
+              <textarea id="addressInput" name="address" rows="2" required placeholder="Shahar, ko'cha, uy">${esc(d.address)}</textarea>
+              <small class="hint">Xonadon, podyezd va qavatni ham yozing</small>
+            </div>`
+          : ""
+      }
+      <label class="field">Izoh<textarea name="comment" rows="2" placeholder="Lift bor/yo'q, qulay vaqt...">${esc(d.comment)}</textarea></label>
       <div class="total"><span>Jami</span><span>${sum(total)} so'm</span></div>
       <button class="btn" type="submit">Tasdiqlash</button>
     </form>`;
-  body.onclick = (e) => {
-    const seg = e.target.closest("[data-type]");
-    if (!seg) return;
-    state.orderType = seg.dataset.type;
-    save("em_order_type", state.orderType);
-    renderHeader();
-    drawSheet();
+  const form = body.querySelector("form");
+  form.oninput = (e) => {
+    if (e.target.name) d[e.target.name] = e.target.value;
   };
-  body.querySelector("form").onsubmit = async (e) => {
+  body.onclick = async (e) => {
+    const seg = e.target.closest("[data-type]");
+    if (seg) {
+      state.orderType = seg.dataset.type;
+      save("em_order_type", state.orderType);
+      renderHeader();
+      return drawSheet();
+    }
+    const auto = e.target.closest("[data-auto]")?.dataset.auto;
+    if (auto === "clear-location") {
+      d.location = null;
+      return drawSheet();
+    }
+    if (auto === "phone") {
+      try {
+        d.phone = await requestPhone();
+        haptic();
+        drawSheet();
+      } catch (err) {
+        toast(err.message);
+      }
+    }
+    if (auto === "location") {
+      const btn = e.target.closest("[data-auto]");
+      btn.disabled = true;
+      btn.textContent = "📍 Aniqlanmoqda…";
+      try {
+        d.location = await requestLocation();
+        const { address } = await api(`/api/geocode?lat=${d.location.lat}&lon=${d.location.lon}`).catch(() => ({}));
+        if (address) d.address = address;
+        else toast("Joylashuv biriktirildi, manzilni qo'lda yozing");
+        haptic();
+      } catch (err) {
+        toast(err.message);
+      }
+      drawSheet();
+    }
+  };
+  form.onsubmit = async (e) => {
     e.preventDefault();
     const btn = e.target.querySelector("button[type=submit]");
     const data = Object.fromEntries(new FormData(e.target));
-    save("em_checkout", { name: data.name, phone: data.phone, address: data.address });
+    const location = type === "delivery" ? d.location : null;
+    save("em_checkout", { name: data.name, phone: data.phone, address: data.address, location });
     btn.disabled = true;
     try {
       await api("/api/orders", {
         method: "POST",
-        body: { ...data, orderType: type, items: cartLines().map((l) => ({ id: l.p.id, qty: l.qty })) },
+        body: { ...data, location, orderType: type, items: cartLines().map((l) => ({ id: l.p.id, qty: l.qty })) },
       });
       tg?.HapticFeedback?.notificationOccurred("success");
       state.cart = {};
       save("em_cart", state.cart);
+      checkout = null;
       renderCatalog();
       sheetStack = [successSheet];
       drawSheet();
