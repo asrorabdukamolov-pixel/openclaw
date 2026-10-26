@@ -10,29 +10,12 @@ if (tg) {
   tg.setBottomBarColor?.("#FFFFFF");
 }
 
-// Browser admin access: open /?admin=<ADMIN_TOKEN> once; the token is remembered on this device.
-const params = new URLSearchParams(location.search);
-if (params.has("admin")) {
-  try {
-    localStorage.setItem("em_admin", params.get("admin"));
-  } catch {}
-  history.replaceState(null, "", location.pathname);
-}
-const adminToken = (() => {
-  try {
-    return localStorage.getItem("em_admin") || "";
-  } catch {
-    return "";
-  }
-})();
-
 async function api(path, options = {}) {
   const res = await fetch(path, {
     ...options,
     headers: {
       "content-type": "application/json",
       "x-telegram-init-data": tg?.initData || "",
-      "x-admin-token": adminToken,
       ...options.headers,
     },
     body: options.body ? JSON.stringify(options.body) : undefined,

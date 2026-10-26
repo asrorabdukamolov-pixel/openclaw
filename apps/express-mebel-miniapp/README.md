@@ -1,7 +1,9 @@
-# Express Mebel — Telegram Mini App
+# Express Mebel — Telegram Mini App (Firebase)
 
-Mebel do'koni uchun Telegram mini ilova: katalog, savat, buyurtma va mahsulotlarni boshqarish (admin panel).
-Ranglar va shriftlar Express Mebel brendbukidan olingan:
+Mebel do'koni uchun Telegram mini ilova: katalog, savat, buyurtma, ombor va mahsulotlarni boshqarish.
+Firebase'da ishlaydi: **Hosting** (sahifalar), **Cloud Functions** (API + bot), **Firestore** (mahsulotlar, ombor, buyurtmalar), **Storage** (rasmlar).
+
+Ranglar va shriftlar Express Mebel brendbukidan:
 
 | Token | Rang | Brendbuk |
 | --- | --- | --- |
@@ -10,88 +12,108 @@ Ranglar va shriftlar Express Mebel brendbukidan olingan:
 | Bazaviy to'q kulrang | `#303030` | PANTONE 426 |
 | Oq | `#FFFFFF` | — |
 
-Shriftlar: **Prompt Italic** (sarlavhalar, lotin) va **Montserrat** (asosiy matn). Bannerlarda brend-motiv — uchta qiya chiziq.
-
-Bo'limlar: **Oshxona, Shkaf, Tumba, Parta, Pufik, Krovat**.
+Shriftlar: **Prompt Italic** (sarlavhalar) va **Montserrat** (matn). Bo'limlar: **Oshxona, Shkaf, Tumba, Parta, Pufik, Krovat**.
 
 ## Imkoniyatlar
 
-- FeedUp uslubidagi bosh sahifa: profil rasmi, "Buyurtma turi", menyu, bannerlar, qidiruv, yopishqoq bo'lim tablari, 2 ustunli mahsulot kartalari ("Yangi" belgisi, chegirma %, eski narx, `+` tugmasi).
-- Mahsulot sahifasi (bir nechta rasm, o'lcham, material, tavsif), savat, buyurtma (yetkazib berish / olib ketish).
-- Buyurtma admin chatiga Telegram bot orqali yuboriladi, mijozga tasdiq xabari boradi.
-- **Avtomatik telefon va manzil**: "📱 Telegram raqamimni yuborish" (Telegram `requestContact`, Bot API 6.9+) va
-  "📍 Joylashuvimni aniqlash" (Telegram `LocationManager`, Bot API 8.0+; brauzerda — geolocation).
-  Koordinata OpenStreetMap Nominatim orqali manzil matniga aylanadi (`/api/geocode`, 1 so'rov/soniya cheklovi bilan),
-  mijoz uni tahrirlab, podyezd/qavatni qo'shadi. Admin chatiga buyurtma bilan birga Google/Yandex xarita havolalari
-  va Telegram lokatsiya pini keladi — kuryer bir bosishda navigatsiyani ochadi.
-- **Admin panel**: mahsulot qo'shish / tahrirlash / o'chirish, telefondan rasm yuklash (avtomatik siqiladi), narx, eski narx, "Yangi" belgisi.
-- **Ombor (tayyor mahsulot ombori)**: har bir mahsulotning qoldig'i, kirim / chiqim, harakatlar tarixi (kim, qachon, nechta, izoh).
-  Buyurtma tushganda qoldiq avtomatik kamayadi; qoldiq 0 bo'lsa mahsulot saytda "Sotuvda yo'q" bo'ladi va uni sotib olib bo'lmaydi.
-  Mijoz ombordagidan ko'p miqdorni savatga qo'sha olmaydi.
+- Katalog: bannerlar, qidiruv, bo'lim tablari, "Yangi" belgisi, chegirma %, eski narx.
+- Mahsulot sahifasi, savat, buyurtma (yetkazib berish / olib ketish).
+- Telefon raqam Telegram'dan bir bosishda (`requestContact`), manzil lokatsiyadan avtomatik (`LocationManager` + OpenStreetMap).
+- Buyurtma admin chatiga xarita havolalari va lokatsiya pini bilan keladi, mijozga tasdiq xabari boradi. Buyurtmalar Firestore `orders` kolleksiyasida ham saqlanadi.
+- **Ombor**: qoldiq, kirim / chiqim, harakatlar tarixi. Buyurtmada qoldiq tranzaksiyada kamayadi; 0 bo'lsa mahsulot sotuvdan chiqadi.
+- **Admin panel**: mahsulot qo'shish / tahrirlash / o'chirish, telefondan rasm yuklash.
 
-## Ishga tushirish
+| Rol | Kim | Nima qila oladi |
+| --- | --- | --- |
+| Admin | `ADMIN_IDS` | hamma narsa |
+| Ombor xodimi | `WAREHOUSE_IDS` | faqat kirim / chiqim |
+| Mijoz | boshqalar | katalog va buyurtma |
 
-Hech qanday paket o'rnatish shart emas (Node.js 20+).
+## Firebase'ga ulash (bir marta)
+
+Kompyuter shart emas — hammasi brauzerda (telefonda ham bo'ladi, lekin kompyuterda qulayroq).
+
+### 1. Telegram
+
+1. **@BotFather** → botingiz → **API Token** (eski token oshkor bo'lgan bo'lsa: `/revoke` → yangisi).
+2. **@userinfobot** → o'z **ID** raqamingiz (admin uchun). Ombor xodimlari ham shu yo'l bilan ID'sini bilib beradi.
+
+### 2. Firebase loyiha
+
+1. https://console.firebase.google.com → **Create a project** → nomi, masalan `express-mebel` → Google Analytics shart emas.
+   Loyiha **ID** sini eslab qoling (masalan `express-mebel-1a2b3`) — sayt manzili `https://<ID>.web.app` bo'ladi.
+2. Chapda pastda **Upgrade** → **Blaze** tarifi → karta ulang (Visa/Mastercard). Bepul limit kichik do'kon uchun yetadi.
+   Xavotir bo'lmasligi uchun **Budget alert** qo'ying (masalan $5).
+3. **Build → Firestore Database → Create database** → joylashuv **eur3 (Europe)** → *Start in production mode*.
+4. **Build → Storage → Get started** → o'sha joylashuv → *production mode*.
+
+### 3. Yuklash (Google Cloud Shell)
+
+https://shell.cloud.google.com ni o'sha Google akkaunt bilan oching va buyruqlarni ketma-ket kiriting:
 
 ```bash
+git clone --depth 1 --filter=blob:none --sparse -b claude/manga-mini-telegram-app-65fu6q \
+  https://github.com/asrorabdukamolov-pixel/openclaw.git express-mebel
+cd express-mebel && git sparse-checkout set apps/express-mebel-miniapp
 cd apps/express-mebel-miniapp
-BOT_TOKEN=123456:ABC... \
-WEBAPP_URL=https://sizning-domen.uz \
-ADMIN_IDS=111111111,222222222 \
-node server.mjs
+
+command -v firebase || npm install -g firebase-tools   # Cloud Shell'da odatda bor
+firebase login --no-localhost        # havolani oching, ruxsat bering, kodni qaytarib qo'ying
+(cd functions && npm install)
+firebase deploy --project <ID>       # <ID> o'rniga loyiha ID si
 ```
 
-| O'zgaruvchi | Vazifasi |
+`firebase deploy` birinchi marta so'raydi:
+
+| Savol | Javob |
 | --- | --- |
-| `BOT_TOKEN` | @BotFather bergan token. Bot `/start` ga katalog tugmasi bilan javob beradi va menyu tugmasini o'rnatadi. |
-| `WEBAPP_URL` | Serverning ochiq **HTTPS** manzili (Telegram faqat HTTPS qabul qiladi). |
-| `ADMIN_IDS` | Mahsulotlarni va omborni boshqara oladigan Telegram user id lar (vergul bilan). Id ni @userinfobot dan bilish mumkin. |
-| `WAREHOUSE_IDS` | Ombor xodimlari: faqat kirim / chiqim kiritadi, mahsulot va narxni o'zgartira olmaydi. |
-| `ORDERS_CHAT_ID` | Buyurtmalar keladigan chat (ixtiyoriy, standart — birinchi admin). |
-| `ADMIN_TOKEN` | Ixtiyoriy parol: oddiy brauzerda `https://domen/?admin=PAROL` ochib admin panelga kirish. |
-| `PORT` | Port (standart `3000`). |
-| `DATA_DIR` | Mahsulotlar va rasmlar saqlanadigan papka (standart `./data`). |
+| `BOT_TOKEN` | bot tokeni (ekranda ko'rinmaydi, bu normal) |
+| `ADMIN_IDS` | sizning ID'ingiz; bir nechta bo'lsa `111,222` |
+| `WAREHOUSE_IDS` | ombor xodimlari ID'lari yoki `-` |
+| `ORDERS_CHAT_ID` | buyurtmalar guruhi ID'si yoki `-` (birinchi adminga keladi) |
 
-### Bot sozlash
+API'larni yoqish haqida so'rasa — **Yes**. Birinchi deploy xato bilan tugasa (ruxsatlar hali tarqalmagan bo'ladi), 2–3 daqiqadan keyin `firebase deploy --project <ID>` ni qayta ishga tushiring.
 
-1. @BotFather → `/newbot` → token oling.
-2. Serverni HTTPS domen ortida ishga tushiring (masalan Nginx + Let's Encrypt, Railway, Render, VPS).
-3. @BotFather → `/mybots` → bot → *Bot Settings* → *Configure Mini App* → `WEBAPP_URL` ni kiriting (ixtiyoriy, server menyu tugmasini o'zi ham o'rnatadi).
-4. Botga `/start` yozing → "Katalogni ochish".
+### 4. Botni ulash
 
-### Ombor
+Brauzerda oching: `https://<ID>.web.app/api/setup`
 
-Menyuda **📦 Ombor** (admin va ombor xodimlariga ko'rinadi):
+`{"ok":true,"bot":"@...","seeded":true}` chiqsa — tayyor: bot webhook'i va **Katalog** menyu tugmasi o'rnatildi, katalog namunaviy mahsulotlar bilan to'ldirildi.
+Botga `/start` yozing → **🛋 Katalogni ochish**.
 
-1. Ro'yxatda mahsulotlar qoldiq bo'yicha tartiblangan: tugaganlar (qizil) va kam qolganlar (≤ 3, sariq) tepada.
-2. Mahsulotni bosing → **＋ Kirim** yoki **− Chiqim** → miqdor va izoh → saqlang.
-3. Har bir harakat jurnalga yoziladi: Kirim, Chiqim, Sotuv (buyurtmadan avtomatik).
+## Keyin o'zgartirish
 
-Yangi mahsulot qo'shishda "Boshlang'ich qoldiq" kiritiladi; keyin qoldiq faqat ombor orqali o'zgaradi.
-Buyurtmadan keyin mahsulot tugasa yoki 3 tadan kam qolsa, admin chatiga kelgan buyurtma xabarida ogohlantirish bo'ladi.
+- **Admin / ombor ID'lari, buyurtma chati**: Cloud Shell'da `functions/.env.<ID>` faylini tahrirlang (`nano functions/.env.<ID>`) → `firebase deploy --only functions --project <ID>`.
+- **Bot tokeni**: `firebase functions:secrets:set BOT_TOKEN --project <ID>` → `firebase deploy --only functions --project <ID>` → `/api/setup` ni qayta oching.
+- **Kod yangilansa**: `git pull` → `firebase deploy --project <ID>`.
+- Ma'lumotlarni Firebase konsolida ko'rish: **Firestore** → `products`, `stockMovements`, `orders`.
 
-Jurnal `data/stock-movements.json` faylida saqlanadi.
+## Mahalliy sinov (dasturchilar uchun)
 
-### Mahsulot qo'shish
-
-Admin (`ADMIN_IDS` dagi foydalanuvchi) mini ilovani ochganda menyuda **⚙️ Mahsulotlarni boshqarish** paydo bo'ladi
-(profil rasmini bosish ham admin panelni ochadi). U yerda **＋ Yangi mahsulot qo'shish** → rasmlar, nom, bo'lim, narx → **Saqlash**.
-
-Ma'lumotlar `data/products.json` da, rasmlar `data/uploads/` da saqlanadi — server qayta ishga tushganda ham yo'qolmaydi.
-Birinchi ishga tushishda namunaviy mahsulotlar `seed-products.json` dan olinadi; ularni admin paneldan o'chirib yuborish mumkin.
+```bash
+cd functions && npm install && cd ..
+printf 'ADMIN_IDS=42\nWAREHOUSE_IDS=-\nORDERS_CHAT_ID=-\n' > functions/.env.local
+printf 'BOT_TOKEN=123:abc\n' > functions/.secret.local
+firebase emulators:start --project demo-express
+# http://127.0.0.1:5000  →  /api/setup katalogni to'ldiradi (Telegram qismi soxta token bilan xato beradi)
+```
 
 ## API
 
+Hammasi `https://<ID>.web.app/api/...` ostida (Hosting → `api` funksiyasi, `europe-west1`).
+
 | Metod | Yo'l | Ruxsat |
 | --- | --- | --- |
+| GET | `/api/setup` | hamma (webhook, menyu tugmasi, bo'sh katalogni to'ldirish) |
+| POST | `/api/telegram` | faqat Telegram (`X-Telegram-Bot-Api-Secret-Token`) |
 | GET | `/api/config` | hamma |
-| GET | `/api/products` | hamma |
+| GET | `/api/products`, `/api/products/:id` | hamma |
 | POST | `/api/products` | admin |
 | PUT / DELETE | `/api/products/:id` | admin |
-| POST | `/api/upload` | admin (`{ dataUrl }`) |
+| POST | `/api/upload` | admin (`{ dataUrl }` → Storage) |
 | GET | `/api/stock?productId=` | admin, ombor |
 | POST | `/api/stock` | admin, ombor (`{ productId, type: "in" \| "out", qty, note }`) |
 | GET | `/api/geocode?lat=&lon=` | hamma |
 | POST | `/api/orders` | hamma (qoldiqdan ko'p bo'lsa 409) |
 
-Admin tekshiruvi Telegram `initData` imzosi (bot token bilan HMAC) yoki `x-admin-token` sarlavhasi orqali.
+Rol Telegram `initData` imzosi (bot token bilan HMAC) orqali aniqlanadi. Firestore va Storage qoidalari to'g'ridan-to'g'ri kirishni yopadi — hamma narsa funksiya orqali.
