@@ -32,6 +32,7 @@ const db = getFirestore();
 const productsCol = db.collection("products");
 const movementsCol = db.collection("stockMovements");
 const ordersCol = db.collection("orders");
+const bannersCol = db.collection("banners");
 
 const PROJECT_ID = process.env.GCLOUD_PROJECT;
 const WEBAPP_URL = `https://${PROJECT_ID}.web.app`;
@@ -69,10 +70,10 @@ function storageUrl(bucket, path, token) {
   return `${host}/v0/b/${bucket}/o/${encodeURIComponent(path)}?alt=media&token=${token}`;
 }
 
-// Only bundled placeholders or photos uploaded to this project's bucket are accepted.
+// Only bundled placeholders or images uploaded to this project's bucket are accepted.
 function isOwnImage(src) {
   if (src.startsWith("/img/")) return true;
-  const prefix = storageUrl(getStorage().bucket().name, "products/", "").split("?")[0];
+  const prefix = storageUrl(getStorage().bucket().name, "images/", "").split("?")[0];
   return src.startsWith(prefix);
 }
 
@@ -80,7 +81,7 @@ async function saveImage(dataUrl) {
   const m = /^data:image\/(jpeg|png|webp);base64,(.+)$/.exec(String(dataUrl || ""));
   if (!m) throw new HttpError(400, "Faqat JPG, PNG yoki WEBP rasm");
   const bucket = getStorage().bucket();
-  const path = `products/${randomUUID()}.${m[1] === "jpeg" ? "jpg" : m[1]}`;
+  const path = `images/${randomUUID()}.${m[1] === "jpeg" ? "jpg" : m[1]}`;
   const token = randomUUID();
   await bucket.file(path).save(Buffer.from(m[2], "base64"), {
     contentType: `image/${m[1]}`,
@@ -125,6 +126,44 @@ function cleanProduct(input, existing = {}) {
     updatedAt: Date.now(),
   };
 }
+
+const BANNER_STYLES = new Set(["photo", "dark", "teal"]);
+const BANNER_LINKS = new Set(["none", "product", "category"]);
+
+// Banners: "photo" shows the image edge to edge; "dark"/"teal" are brand text cards with a side image.
+function cleanBanner(input, existing = {}) {
+  const pick = (key) => input[key] ?? existing[key];
+  const style = String(pick("style") ?? "dark");
+  const linkType = String(pick("linkType") ?? "none");
+  const image = pick("image") ? String(pick("image")) : "";
+  const title = String(pick("title") ?? "").trim().slice(0, 80);
+  if (!BANNER_STYLES.has(style)) throw new HttpError(400, "Banner ko'rinishi noto'g'ri");
+  if (!BANNER_LINKS.has(linkType)) throw new HttpError(400, "Havola turi noto'g'ri");
+  if (image && !isOwnImage(image)) throw new HttpError(400, "Rasm noto'g'ri");
+  if (style === "photo" && !image) throw new HttpError(400, "Rasmli banner uchun rasm yuklang");
+  if (style !== "photo" && !title) throw new HttpError(400, "Sarlavha kiritilmagan");
+  const linkId = linkType === "none" ? "" : String(pick("linkId") ?? "");
+  if (linkType === "category" && !CATEGORY_IDS.has(linkId)) throw new HttpError(400, "Bo'lim tanlanmagan");
+  if (linkType === "product" && !/^[\w-]{1,64}$/.test(linkId)) throw new HttpError(400, "Mahsulot tanlanmagan");
+  return {
+    style,
+    title,
+    text: String(pick("text") ?? "").trim().slice(0, 140),
+    image,
+    linkType,
+    linkId,
+    active: Boolean(pick("active") ?? true),
+    order: Math.round(Number(pick("order"))) || 0,
+    createdAt: existing.createdAt || Date.now(),
+    updatedAt: Date.now(),
+  };
+}
+
+const SEED_BANNERS = [
+  { style: "dark", title: "Interyeringiz uchun mukammal mebel", text: "Oshxonadan yotoqxonagacha — hammasi bir joyda", image: "/img/oshxona.svg", linkType: "category", linkId: "oshxona", order: 1 },
+  { style: "teal", title: "Yangi kolleksiya", text: "Zamonaviy krovat va shkaflar", image: "/img/krovat.svg", linkType: "category", linkId: "krovat", order: 2 },
+  { style: "dark", title: "Tez yetkazib berish", text: "Shahar bo'ylab o'rnatib beramiz", image: "/img/shkaf.svg", linkType: "none", linkId: "", order: 3 },
+];
 
 function parseLocation(value) {
   if (!value) return null;
@@ -283,10 +322,16 @@ async function handleTelegramUpdate(req, res) {
 // Safe to call repeatedly; it only points the bot at this project's own URLs.
 async function handleSetup(res) {
   const empty = (await productsCol.limit(1).get()).empty;
-  if (empty) {
-    const seed = JSON.parse(readFileSync(new URL("./seed-products.json", import.meta.url), "utf8"));
+  const noBanners = (await bannersCol.limit(1).get()).empty;
+  if (empty || noBanners) {
     const batch = db.batch();
-    for (const { id, ...p } of seed) batch.set(productsCol.doc(id), p);
+    if (empty) {
+      const seed = JSON.parse(readFileSync(new URL("./seed-products.json", import.meta.url), "utf8"));
+      for (const { id, ...p } of seed) batch.set(productsCol.doc(id), p);
+    }
+    if (noBanners) {
+      for (const b of SEED_BANNERS) batch.set(bannersCol.doc(), cleanBanner(b));
+    }
     await batch.commit();
   }
   const webhook = `${WEBAPP_URL}/api/telegram`;
@@ -299,7 +344,7 @@ async function handleSetup(res) {
     // Most often a wrong BOT_TOKEN: Telegram answers "Unauthorized".
     throw new HttpError(502, `Telegram bilan ulanib bo'lmadi (${err.message}). BOT_TOKEN ni tekshiring.`);
   }
-  res.json({ ok: true, bot: `@${bot.username}`, webapp: WEBAPP_URL, webhook, seeded: empty });
+  res.json({ ok: true, bot: `@${bot.username}`, webapp: WEBAPP_URL, webhook, seeded: empty, bannersSeeded: noBanners });
 }
 
 async function handleOrder(req, res) {
@@ -460,6 +505,43 @@ async function route(req, res) {
       await ref.delete();
       return res.json({ ok: true });
     }
+  }
+
+  if (path === "/api/banners" && method === "GET") {
+    // Admins also get hidden banners so they can switch them back on.
+    const all = req.query.all === "1" && authenticate(req).role === "admin";
+    const snap = await bannersCol.get();
+    const list = snap.docs
+      .map((d) => ({ id: d.id, ...d.data() }))
+      .filter((b) => all || b.active)
+      .sort((a, b) => a.order - b.order || a.createdAt - b.createdAt);
+    return res.json(list);
+  }
+
+  if (path === "/api/banners" && method === "POST") {
+    requireRole(req, "admin");
+    const ref = bannersCol.doc();
+    const banner = cleanBanner(req.body || {});
+    await ref.set(banner);
+    return res.status(201).json({ id: ref.id, ...banner });
+  }
+
+  const bannerMatch = path.match(/^\/api\/banners\/([\w-]{1,64})$/);
+  if (bannerMatch && (method === "PUT" || method === "DELETE")) {
+    requireRole(req, "admin");
+    const ref = bannersCol.doc(bannerMatch[1]);
+    if (method === "DELETE") {
+      await ref.delete();
+      return res.json({ ok: true });
+    }
+    const banner = await db.runTransaction(async (t) => {
+      const snap = await t.get(ref);
+      if (!snap.exists) throw new HttpError(404, "Banner topilmadi");
+      const next = cleanBanner(req.body || {}, snap.data());
+      t.set(ref, next);
+      return next;
+    });
+    return res.json({ id: ref.id, ...banner });
   }
 
   if (path === "/api/upload" && method === "POST") {

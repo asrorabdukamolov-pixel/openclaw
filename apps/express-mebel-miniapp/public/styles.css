@@ -1064,3 +1064,66 @@ select {
 .hint {
   font-size: 12px;
 }
+
+/* ---------- banner management ---------- */
+.banner--photo {
+  padding: 0;
+  background: var(--card);
+}
+
+.banner--photo img {
+  position: absolute;
+  inset: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  object-fit: cover;
+}
+
+.banner-caption {
+  position: relative;
+  margin-top: auto;
+  padding: 40px 20px 16px;
+  background: linear-gradient(transparent, rgb(43 42 41 / 0.75));
+}
+
+.banner--photo h3,
+.banner--photo p {
+  max-width: none;
+}
+
+.banner[data-link] {
+  cursor: pointer;
+}
+
+.banner-preview {
+  padding: 0;
+  margin-bottom: 16px;
+  overflow: visible;
+}
+
+.banner-preview .banner {
+  flex-basis: 100%;
+}
+
+.seg--3 {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.banner-swatch {
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+  background: var(--ink);
+}
+
+.banner-swatch--teal {
+  background: var(--teal);
+}
+
+.chip--off {
+  background: var(--card);
+  color: var(--muted);
+}

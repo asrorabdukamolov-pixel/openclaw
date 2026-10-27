@@ -33,6 +33,7 @@ const state = {
   query: "",
   orderType: load("em_order_type", null),
   cart: load("em_cart", {}),
+  banners: [],
 };
 
 function load(key, fallback) {
@@ -81,43 +82,57 @@ function renderHeader() {
 }
 
 // ---------- banners ----------
-const BANNERS = [
-  {
-    cls: "",
-    title: "Interyeringiz uchun mukammal mebel",
-    text: "Oshxonadan yotoqxonagacha — hammasi bir joyda",
-    img: "/img/oshxona.svg",
-  },
-  { cls: "banner--teal", title: "Yangi kolleksiya", text: "Zamonaviy krovat va shkaflar", img: "/img/krovat.svg" },
-  { cls: "", title: "Tez yetkazib berish", text: "Shahar bo'ylab o'rnatib beramiz", img: "/img/shkaf.svg" },
-];
+function bannerHtml(b) {
+  const link = b.linkType === "none" ? "" : `data-link="${b.linkType}:${esc(b.linkId)}"`;
+  if (b.style === "photo") {
+    return `<article class="banner banner--photo" ${link}>
+      <img src="${esc(b.image)}" alt="${esc(b.title)}" />
+      ${b.title || b.text ? `<div class="banner-caption"><h3>${esc(b.title)}</h3>${b.text ? `<p>${esc(b.text)}</p>` : ""}</div>` : ""}
+    </article>`;
+  }
+  return `<article class="banner ${b.style === "teal" ? "banner--teal" : ""}" ${link}>
+      <div class="motif"><i></i><i></i><i></i></div>
+      <div><h3>${esc(b.title)}</h3>${b.text ? `<p>${esc(b.text)}</p>` : ""}</div>
+      ${b.image ? `<img src="${esc(b.image)}" alt="" />` : ""}
+    </article>`;
+}
+
+let bannerIndex = 0;
 
 function renderBanners() {
   const wrap = $("#banners");
-  wrap.innerHTML = BANNERS.map(
-    (b) => `<article class="banner ${b.cls}">
-      <div class="motif"><i></i><i></i><i></i></div>
-      <div><h3>${b.title}</h3><p>${b.text}</p></div>
-      <img src="${b.img}" alt="" />
-    </article>`,
-  ).join("");
-  $("#dots").innerHTML = BANNERS.map((_, i) => `<i class="${i ? "" : "on"}"></i>`).join("");
-  let index = 0;
+  const list = state.banners;
+  wrap.hidden = $("#dots").hidden = list.length === 0;
+  wrap.innerHTML = list.map(bannerHtml).join("");
+  $("#dots").innerHTML = list.length > 1 ? list.map((_, i) => `<i class="${i ? "" : "on"}"></i>`).join("") : "";
+  bannerIndex = 0;
+  wrap.scrollLeft = 0;
+}
+
+function setupBanners() {
+  const wrap = $("#banners");
+  const step = () => wrap.firstElementChild.offsetWidth + 12;
   wrap.addEventListener(
     "scroll",
     () => {
-      const i = Math.round(wrap.scrollLeft / (wrap.firstElementChild.offsetWidth + 12));
-      if (i === index) return;
-      index = i;
+      if (!wrap.firstElementChild) return;
+      const i = Math.round(wrap.scrollLeft / step());
+      if (i === bannerIndex) return;
+      bannerIndex = i;
       [...$("#dots").children].forEach((d, j) => d.classList.toggle("on", j === i));
     },
     { passive: true },
   );
   setInterval(() => {
-    if (document.hidden) return;
-    const next = (index + 1) % BANNERS.length;
-    wrap.scrollTo({ left: next * (wrap.firstElementChild.offsetWidth + 12), behavior: "smooth" });
+    if (document.hidden || state.banners.length < 2) return;
+    const next = (bannerIndex + 1) % state.banners.length;
+    wrap.scrollTo({ left: next * step(), behavior: "smooth" });
   }, 5000);
+  wrap.onclick = (e) => {
+    const [type, id] = (e.target.closest("[data-link]")?.dataset.link || "").split(":");
+    if (type === "product" && byId(id)) openSheet(productSheet(id));
+    if (type === "category") document.querySelector(`[data-tab="${id}"]`)?.click();
+  };
 }
 
 // ---------- catalog ----------
@@ -688,6 +703,157 @@ function productForm(id) {
   };
 }
 
+// ---------- banners (admin) ----------
+const BANNER_STYLE_LABEL = { photo: "Rasm", dark: "Qora", teal: "Moviy" };
+
+function bannersSheet(body) {
+  body.innerHTML = `<h3>Bannerlar va aksiyalar</h3>
+    <p class="hint" style="margin:-6px 0 12px">Bosh sahifaning tepasidagi aylanuvchi bannerlar. Tartib raqami kichigi birinchi chiqadi.</p>
+    <button class="btn" data-new style="margin-bottom:10px">＋ Yangi banner</button>
+    <div id="bannerList"><p class="empty">Yuklanmoqda…</p></div>`;
+  api("/api/banners?all=1")
+    .then((list) => {
+      body.querySelector("#bannerList").innerHTML = list.length
+        ? list
+            .map(
+              (b) => `<button class="admin-item" data-edit="${b.id}" data-banner='${esc(JSON.stringify(b))}'>
+                ${b.image ? `<img src="${esc(b.image)}" alt="" />` : `<span class="banner-swatch banner-swatch--${b.style}"></span>`}
+                <div><div class="line-name">${esc(b.title || "(sarlavhasiz)")}</div><small>№${b.order} · ${BANNER_STYLE_LABEL[b.style]}</small></div>
+                <span class="chip ${b.active ? "" : "chip--off"}">${b.active ? "Faol" : "Yashirin"}</span>
+              </button>`,
+            )
+            .join("")
+        : '<p class="empty">Hali banner yo\'q</p>';
+    })
+    .catch((err) => (body.querySelector("#bannerList").innerHTML = `<p class="empty">${esc(err.message)}</p>`));
+  body.onclick = (e) => {
+    if (e.target.closest("[data-new]")) openSheet(bannerForm(null));
+    const item = e.target.closest("[data-banner]");
+    if (item) openSheet(bannerForm(JSON.parse(item.dataset.banner)));
+  };
+}
+
+function bannerForm(existing) {
+  const b = { style: "photo", title: "", text: "", image: "", linkType: "none", linkId: "", active: true, order: state.banners.length + 1, ...existing };
+  return (body) => {
+    const productOptions = state.products
+      .map((p) => `<option value="${p.id}" ${b.linkType === "product" && b.linkId === p.id ? "selected" : ""}>${esc(p.name)}</option>`)
+      .join("");
+    const categoryOptions = state.categories
+      .map((c) => `<option value="${c.id}" ${b.linkType === "category" && b.linkId === c.id ? "selected" : ""}>${c.name}</option>`)
+      .join("");
+    body.innerHTML = `<h3>${existing ? "Bannerni tahrirlash" : "Yangi banner"}</h3>
+      <div class="banners banner-preview">${bannerHtml({ ...b, title: b.title || "Sarlavha", image: b.image || (b.style === "photo" ? "/img/mark.svg" : "") })}</div>
+      <form id="bannerForm">
+        <div class="field">Ko'rinishi</div>
+        <div class="seg seg--3">
+          ${["photo", "dark", "teal"].map((st) => `<button type="button" class="${b.style === st ? "on" : ""}" data-style="${st}">${BANNER_STYLE_LABEL[st]}</button>`).join("")}
+        </div>
+        <div class="field">
+          ${b.style === "photo" ? "Rasm (gorizontal, taxminan 2:1 — masalan 1200×600)" : "Yon rasm (ixtiyoriy, fonsiz PNG yaxshi)"}
+          <div class="thumbs">
+            ${b.image ? `<div class="thumb" style="background-image:url('${esc(b.image)}')"><button type="button" data-rm>✕</button></div>` : '<button type="button" class="thumb-add" data-pick>＋</button>'}
+          </div>
+          <input type="file" id="bannerFile" accept="image/*" hidden />
+        </div>
+        <label class="field">Sarlavha${b.style === "photo" ? " (ixtiyoriy, rasm ustida chiqadi)" : ""}<input name="title" maxlength="80" value="${esc(b.title)}" placeholder="Masalan: Oshxonalarga -20% chegirma" /></label>
+        <label class="field">Matn (ixtiyoriy)<input name="text" maxlength="140" value="${esc(b.text)}" placeholder="Aksiya 30-noyabrgacha" /></label>
+        <label class="field">Bosilganda
+          <select name="linkType">
+            <option value="none" ${b.linkType === "none" ? "selected" : ""}>Hech narsa</option>
+            <option value="category" ${b.linkType === "category" ? "selected" : ""}>Bo'limni ochish</option>
+            <option value="product" ${b.linkType === "product" ? "selected" : ""}>Mahsulotni ochish</option>
+          </select>
+        </label>
+        ${b.linkType === "category" ? `<label class="field">Bo'lim<select name="linkId">${categoryOptions}</select></label>` : ""}
+        ${b.linkType === "product" ? `<label class="field">Mahsulot<select name="linkId">${productOptions}</select></label>` : ""}
+        <label class="field">Tartib raqami<input name="order" type="number" inputmode="numeric" value="${b.order}" /></label>
+        <label class="check"><input type="checkbox" name="active" ${b.active ? "checked" : ""} /> Saytda ko'rsatish</label>
+        <div class="stack">
+          <button class="btn" type="submit">Saqlash</button>
+          ${existing ? '<button class="btn btn--danger" type="button" data-del>O\'chirish</button>' : ""}
+        </div>
+      </form>`;
+    const form = body.querySelector("form");
+    // Keep typed values when the form re-renders (style/link switches, image upload).
+    const sync = () => {
+      const f = new FormData(form);
+      Object.assign(b, {
+        title: f.get("title"),
+        text: f.get("text"),
+        linkType: f.get("linkType"),
+        linkId: f.get("linkId") ?? "",
+        order: Number(f.get("order")) || 0,
+        active: f.has("active"),
+      });
+    };
+    form.onchange = (e) => {
+      if (e.target.name !== "linkType") return;
+      sync();
+      b.linkId = "";
+      drawSheet();
+    };
+    const fileInput = body.querySelector("#bannerFile");
+    fileInput.onchange = async () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      sync();
+      try {
+        toast("Rasm yuklanmoqda…");
+        const { url } = await api("/api/upload", { method: "POST", body: { dataUrl: await resizeImage(file, 1400) } });
+        b.image = url;
+        drawSheet();
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+    body.onclick = async (e) => {
+      const st = e.target.closest("[data-style]");
+      if (st) {
+        sync();
+        b.style = st.dataset.style;
+        return drawSheet();
+      }
+      if (e.target.closest("[data-pick]")) fileInput.click();
+      if (e.target.closest("[data-rm]")) {
+        sync();
+        b.image = "";
+        drawSheet();
+      }
+      if (e.target.closest("[data-del]")) {
+        if (!(await confirmDialog("Banner o'chirilsinmi?"))) return;
+        try {
+          await api(`/api/banners/${existing.id}`, { method: "DELETE" });
+          await reload();
+          toast("O'chirildi");
+          back();
+        } catch (err) {
+          toast(err.message);
+        }
+      }
+    };
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      sync();
+      const btn = form.querySelector("button[type=submit]");
+      btn.disabled = true;
+      const { id, createdAt, updatedAt, ...payload } = b;
+      // A select defaults to its first option; take it when the admin did not touch it.
+      if (payload.linkType !== "none" && !payload.linkId) payload.linkId = form.querySelector("[name=linkId]")?.value || "";
+      try {
+        await api(existing ? `/api/banners/${existing.id}` : "/api/banners", { method: existing ? "PUT" : "POST", body: payload });
+        await reload();
+        tg?.HapticFeedback?.notificationOccurred("success");
+        toast("Saqlandi");
+        back();
+      } catch (err) {
+        toast(err.message);
+        btn.disabled = false;
+      }
+    };
+  };
+}
+
 // ---------- warehouse ----------
 const MOVE_LABEL = { in: "Kirim", out: "Chiqim", sale: "Sotuv" };
 const when = (ts) =>
@@ -813,7 +979,7 @@ function openDrawer() {
     ["type", "🚚  Buyurtma turi"],
     ...state.categories.map((c) => [`cat:${c.id}`, c.name]),
     ...(isStaff() ? [["stock", "📦  Ombor"]] : []),
-    ...(isAdmin() ? [["admin", "⚙️  Mahsulotlarni boshqarish"]] : []),
+    ...(isAdmin() ? [["admin", "⚙️  Mahsulotlarni boshqarish"], ["banners", "🖼  Bannerlar va aksiyalar"]] : []),
   ];
   $("#drawerNav").innerHTML = items.map(([k, label]) => `<button data-k="${k}">${label}</button>`).join("");
   $("#drawer").hidden = false;
@@ -835,6 +1001,7 @@ $("#drawerNav").onclick = (e) => {
   if (k === "type") openSheet(orderTypeSheet);
   if (k === "admin") openSheet(adminSheet);
   if (k === "stock") openSheet(warehouseSheet);
+  if (k === "banners") openSheet(bannersSheet);
   if (k.startsWith("cat:")) document.querySelector(`[data-tab="${k.slice(4)}"]`)?.click();
 };
 
@@ -875,14 +1042,15 @@ window.addEventListener("scroll", onScroll, { passive: true });
 
 // ---------- boot ----------
 async function reload() {
-  state.products = await api("/api/products");
+  [state.products, state.banners] = await Promise.all([api("/api/products"), api("/api/banners")]);
+  renderBanners();
   renderCatalog();
   renderCartFab();
 }
 
 (async () => {
   renderHeader();
-  renderBanners();
+  setupBanners();
   try {
     const config = await api("/api/config");
     state.categories = config.categories;

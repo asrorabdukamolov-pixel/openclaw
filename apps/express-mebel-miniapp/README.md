@@ -22,6 +22,9 @@ Shriftlar: **Prompt Italic** (sarlavhalar) va **Montserrat** (matn). Bo'limlar: 
 - Buyurtma admin chatiga xarita havolalari va lokatsiya pini bilan keladi, mijozga tasdiq xabari boradi. Buyurtmalar Firestore `orders` kolleksiyasida ham saqlanadi.
 - **Ombor**: qoldiq, kirim / chiqim, harakatlar tarixi. Buyurtmada qoldiq tranzaksiyada kamayadi; 0 bo'lsa mahsulot sotuvdan chiqadi.
 - **Admin panel**: mahsulot qo'shish / tahrirlash / o'chirish, telefondan rasm yuklash.
+- **Bannerlar va aksiyalar** (☰ → 🖼): bosh sahifadagi aylanuvchi bannerlar. Ko'rinish: *Rasm* (butun banner — rasm, 2:1, masalan 1200×600),
+  *Qora* yoki *Moviy* (brend rangidagi matnli karta + yon rasm). Bosilganda bo'lim yoki mahsulotni ochadi.
+  Tartib raqami, "Saytda ko'rsatish" belgisi (yashirilgan banner o'chmaydi, keyin qayta yoqiladi).
 
 | Rol | Kim | Nima qila oladi |
 | --- | --- | --- |
@@ -86,7 +89,7 @@ Botga `/start` yozing → **🛋 Katalogni ochish**.
 - **Admin / ombor ID'lari, buyurtma chati**: Cloud Shell'da `functions/.env.<ID>` faylini tahrirlang (`nano functions/.env.<ID>`) → `firebase deploy --only functions --project <ID>`.
 - **Bot tokeni**: `firebase functions:secrets:set BOT_TOKEN --project <ID>` → `firebase deploy --only functions --project <ID>` → `/api/setup` ni qayta oching.
 - **Kod yangilansa**: `git pull` → `firebase deploy --project <ID>`.
-- Ma'lumotlarni Firebase konsolida ko'rish: **Firestore** → `products`, `stockMovements`, `orders`.
+- Ma'lumotlarni Firebase konsolida ko'rish: **Firestore** → `products`, `stockMovements`, `orders`, `banners`.
 
 ## Mahalliy sinov (dasturchilar uchun)
 
@@ -104,13 +107,16 @@ Hammasi `https://<ID>.web.app/api/...` ostida (Hosting → `api` funksiyasi, `eu
 
 | Metod | Yo'l | Ruxsat |
 | --- | --- | --- |
-| GET | `/api/setup` | hamma (webhook, menyu tugmasi, bo'sh katalogni to'ldirish) |
+| GET | `/api/setup` | hamma (webhook, menyu tugmasi, bo'sh katalog va bannerlarni to'ldirish) |
 | POST | `/api/telegram` | faqat Telegram (`X-Telegram-Bot-Api-Secret-Token`) |
 | GET | `/api/config` | hamma |
 | GET | `/api/products`, `/api/products/:id` | hamma |
 | POST | `/api/products` | admin |
 | PUT / DELETE | `/api/products/:id` | admin |
-| POST | `/api/upload` | admin (`{ dataUrl }` → Storage) |
+| POST | `/api/upload` | admin (`{ dataUrl }` → Storage `images/`) |
+| GET | `/api/banners` | hamma (faol bannerlar); `?all=1` — admin uchun yashirinlari bilan |
+| POST | `/api/banners` | admin |
+| PUT / DELETE | `/api/banners/:id` | admin |
 | GET | `/api/stock?productId=` | admin, ombor |
 | POST | `/api/stock` | admin, ombor (`{ productId, type: "in" \| "out", qty, note }`) |
 | GET | `/api/geocode?lat=&lon=` | hamma |
