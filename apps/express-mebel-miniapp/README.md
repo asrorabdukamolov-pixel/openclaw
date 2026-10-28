@@ -73,6 +73,7 @@ firebase deploy --project <ID>       # <ID> o'rniga loyiha ID si
 | `BOT_TOKEN` | bot tokeni (ekranda ko'rinmaydi, bu normal) |
 | `ADMIN_IDS` | sizning ID'ingiz; bir nechta bo'lsa `111,222` |
 | `ORDERS_CHAT_ID` | buyurtmalar guruhi ID'si yoki `-` (birinchi adminga keladi) |
+| `PAYMENT_PROVIDER_TOKEN` | BotFather'dan to'lov provayderi tokeni yoki `-` (karta to'lovi o'chiq) |
 
 API'larni yoqish haqida so'rasa — **Yes**. Birinchi deploy xato bilan tugasa (ruxsatlar hali tarqalmagan bo'ladi), 2–3 daqiqadan keyin `firebase deploy --project <ID>` ni qayta ishga tushiring.
 
@@ -82,6 +83,29 @@ Brauzerda oching: `https://<ID>.web.app/api/setup`
 
 `{"ok":true,"bot":"@...","seeded":true}` chiqsa — tayyor: bot webhook'i va **Katalog** menyu tugmasi o'rnatildi, katalog namunaviy mahsulotlar bilan to'ldirildi.
 Botga `/start` yozing → **🛋 Katalogni ochish**.
+
+## Karta orqali to'lov
+
+To'lov Telegram Payments orqali: to'lov oynasi Telegram ichida ochiladi, karta ma'lumotlari bizning serverga kelmaydi.
+
+1. To'lov provayderi bilan merchant shartnoma tuzing (O'zbekistonda odatda Click yoki Payme; yuridik shaxs yoki YaTT kerak).
+2. **@BotFather** → `/mybots` → botingiz → **Payments** → provayderni tanlang va ulang. BotFather **provider token** beradi
+   (avval `TEST` tokeni bilan sinab ko'rish mumkin).
+3. Cloud Shell:
+   ```bash
+   firebase functions:secrets:set PAYMENT_PROVIDER_TOKEN --project <ID>   # tokenni qo'ying
+   firebase deploy --only functions --project <ID>
+   ```
+4. `https://<ID>.web.app/api/setup` ni qayta oching (bot to'lov tasdiqlash so'rovlarini qabul qiladigan bo'ladi).
+
+Token o'rniga `-` saqlansa, karta to'lovi o'chiq turadi, faqat "Qabul qilganda" qoladi.
+
+Qanday ishlaydi:
+- Mijoz **💳 Karta orqali** ni tanlaydi → mahsulot bron qilinadi → Telegram to'lov oynasi ochiladi.
+- To'lov o'tsa: buyurtma `paid`, guruhga "💳 TO'LANGAN" xabari, mijozga chek.
+- Oyna yopilsa yoki to'lov o'tmasa: bron darhol qaytadi (ombor tarixida "Bron qaytdi").
+- 30 daqiqada to'lanmagan bronlarni `releaseUnpaid` funksiyasi har 10 daqiqada qaytaradi.
+- Telegram to'lovdan oldin summa, valyuta (UZS) va buyurtma holatini tekshiradi; muddati o'tgan buyurtmaga to'lov qabul qilinmaydi.
 
 ## Omborchini qo'shish
 
@@ -103,7 +127,7 @@ Havola 24 soat va bir marta ishlaydi. Xodimni o'chirish: o'sha bo'limda **O'chir
 ```bash
 cd functions && npm install && cd ..
 printf 'ADMIN_IDS=42\nORDERS_CHAT_ID=-\n' > functions/.env.local
-printf 'BOT_TOKEN=123:abc\n' > functions/.secret.local
+printf 'BOT_TOKEN=123:abc\nPAYMENT_PROVIDER_TOKEN=-\n' > functions/.secret.local
 firebase emulators:start --project demo-express
 # http://127.0.0.1:5000  →  /api/setup katalogni to'ldiradi (Telegram qismi soxta token bilan xato beradi)
 ```
@@ -130,6 +154,7 @@ Hammasi `https://<ID>.web.app/api/...` ostida (Hosting → `api` funksiyasi, `eu
 | POST | `/api/staff/invites` | admin (24 soatlik bir martalik havola) |
 | DELETE | `/api/staff/:telegramId` | admin |
 | GET | `/api/geocode?lat=&lon=` | hamma |
-| POST | `/api/orders` | hamma (qoldiqdan ko'p bo'lsa 409) |
+| POST | `/api/orders/:id/cancel` | buyurtma egasi (to'lanmagan bronni qaytarish) |
+| POST | `/api/orders` | hamma (qoldiqdan ko'p bo'lsa 409); `payment: "card"` → `invoiceLink` |
 
 Rol Telegram `initData` imzosi (bot token bilan HMAC) orqali aniqlanadi. Firestore va Storage qoidalari to'g'ridan-to'g'ri kirishni yopadi — hamma narsa funksiya orqali.

@@ -5,6 +5,7 @@
 //   BOT_TOKEN      secret, Telegram bot token from @BotFather
 //   ADMIN_IDS      Telegram user ids allowed to manage products and stock (comma-separated)
 //   ORDERS_CHAT_ID chat that receives orders (empty = first admin)
+//   PAYMENT_PROVIDER_TOKEN secret, Telegram Payments provider token from @BotFather ('-' = cards off)
 // Warehouse staff join through one-time invite links from the admin panel (Firestore `staff`).
 
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
@@ -13,10 +14,12 @@ import { initializeApp } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import { getStorage } from "firebase-admin/storage";
 import { onRequest } from "firebase-functions/https";
+import { onSchedule } from "firebase-functions/scheduler";
 import { logger } from "firebase-functions";
 import { defineSecret, defineString } from "firebase-functions/params";
 
 const BOT_TOKEN = defineSecret("BOT_TOKEN");
+const PAYMENT_PROVIDER_TOKEN = defineSecret("PAYMENT_PROVIDER_TOKEN");
 const ADMIN_IDS = defineString("ADMIN_IDS", { description: "Admin Telegram user ids, comma-separated" });
 const ORDERS_CHAT_ID = defineString("ORDERS_CHAT_ID", {
   default: "-",
@@ -175,10 +178,10 @@ function parseLocation(value) {
 
 // ---------- stock ----------
 
-// Stock types: "in" (kirim), "out" (chiqim), "sale" (buyurtma). Always called inside a Firestore
+// Stock types: "in" (kirim), "out" (chiqim), "sale" (buyurtma), "release" (to'lanmagan bron qaytdi). Always called inside a Firestore
 // transaction that already read `product`, so concurrent orders cannot oversell the last unit.
 function moveStock(t, ref, product, type, qty, note, by) {
-  const balance = product.stock + (type === "in" ? qty : -qty);
+  const balance = product.stock + (type === "in" || type === "release" ? qty : -qty);
   t.update(ref, { stock: balance, updatedAt: Date.now() });
   product.stock = balance;
   const movement = {
@@ -312,6 +315,14 @@ async function handleTelegramUpdate(req, res) {
   const header = req.get("x-telegram-bot-api-secret-token") || "";
   if (!sameSecret(header, webhookSecret())) throw new HttpError(403, "Forbidden");
   const msg = req.body?.message;
+  if (req.body?.pre_checkout_query) {
+    await handlePreCheckout(req.body.pre_checkout_query);
+    return res.json({ ok: true });
+  }
+  if (msg?.successful_payment) {
+    await handleSuccessfulPayment(msg);
+    return res.json({ ok: true });
+  }
   const invite = /^\/start inv_([a-f0-9]{24})$/.exec(msg?.text || "");
   // Replies are best-effort: a failed send must not make Telegram retry an invite already used.
   try {
@@ -394,7 +405,7 @@ async function handleSetup(res) {
   let bot;
   try {
     bot = await tg("getMe", {});
-    await tg("setWebhook", { url: webhook, secret_token: webhookSecret(), allowed_updates: ["message"] });
+    await tg("setWebhook", { url: webhook, secret_token: webhookSecret(), allowed_updates: ["message", "pre_checkout_query"] });
     await tg("setChatMenuButton", { menu_button: { type: "web_app", text: "Katalog", web_app: { url: WEBAPP_URL } } });
   } catch (err) {
     // Most often a wrong BOT_TOKEN: Telegram answers "Unauthorized".
@@ -403,19 +414,32 @@ async function handleSetup(res) {
   res.json({ ok: true, bot: `@${bot.username}`, webapp: WEBAPP_URL, webhook, seeded });
 }
 
+const REGION = "europe-west1";
+const PAY_WINDOW_MS = 30 * 60 * 1000;
+// Telegram Payments amounts are in the currency's smallest unit; UZS has two decimal places.
+const UZS_MINOR = 100;
+
+const cardsEnabled = () => PAYMENT_PROVIDER_TOKEN.value().trim().length > 1;
+
 async function handleOrder(req, res) {
   const { user } = await authenticate(req);
   const body = req.body || {};
   const phone = String(body.phone || "").trim();
   if (!/^\+?[\d\s()-]{7,20}$/.test(phone)) throw new HttpError(400, "Telefon raqam noto'g'ri");
   const location = body.orderType === "pickup" ? null : parseLocation(body.location);
+  const payment = body.payment === "card" ? "card" : "cash";
+  if (payment === "card" && !cardsEnabled()) throw new HttpError(400, "Karta orqali to'lov hali yoqilmagan");
+  // The invoice opens inside Telegram and the receipt goes to the buyer's chat.
+  if (payment === "card" && !user) throw new HttpError(400, "Karta orqali to'lash uchun ilovani Telegram'da oching");
   const wanted = (Array.isArray(body.items) ? body.items : [])
     .map((it) => ({ id: String(it.id || ""), qty: Math.max(1, Math.min(99, Number(it.qty) | 0)) }))
     .filter((it) => /^[\w-]{1,64}$/.test(it.id));
   if (!wanted.length) throw new HttpError(400, "Savat bo'sh");
   const buyer = user ? staffName(user) : String(body.name || "Mijoz").slice(0, 60);
+  const orderRef = ordersCol.doc();
 
-  const items = await db.runTransaction(async (t) => {
+  // Stock is reserved for card orders too, so the last unit cannot be sold twice while the buyer pays.
+  const order = await db.runTransaction(async (t) => {
     const refs = wanted.map((it) => productsCol.doc(it.id));
     const snaps = await t.getAll(...refs);
     const lines = snaps
@@ -432,48 +456,92 @@ async function handleOrder(req, res) {
       );
     }
     for (const l of lines) moveStock(t, l.ref, l.product, "sale", l.qty, "Buyurtma", buyer);
-    t.set(ordersCol.doc(), {
+    const data = {
       items: lines.map((l) => ({ id: l.ref.id, name: l.product.name, price: l.product.price, qty: l.qty })),
       total: lines.reduce((n, l) => n + l.product.price * l.qty, 0),
+      lowStock: lines.filter((l) => l.product.stock <= 3).map((l) => ({ name: l.product.name, stock: l.product.stock })),
       orderType: body.orderType === "pickup" ? "pickup" : "delivery",
+      payment,
+      status: payment === "card" ? "awaiting_payment" : "new",
       name: String(body.name || "").slice(0, 100),
       phone,
       address: String(body.address || "").slice(0, 300),
       comment: String(body.comment || "").slice(0, 500),
       location,
       telegramUserId: user?.id ?? null,
+      telegramUsername: user?.username ?? "",
       createdAt: Date.now(),
-    });
-    return lines;
+    };
+    t.set(orderRef, data);
+    return data;
   });
 
-  const total = items.reduce((n, l) => n + l.product.price * l.qty, 0);
-  const lines = items.map((l) => `• ${escapeHtml(l.product.name)} × ${l.qty} = ${formatSum(l.product.price * l.qty)}`);
-  const who = user
-    ? `${escapeHtml(staffName(user))}${user.username ? ` (@${escapeHtml(user.username)})` : ""}`
+  if (payment === "cash") {
+    await notifyOrder(order);
+    return res.status(201).json({ ok: true, orderId: orderRef.id, total: order.total });
+  }
+  try {
+    const invoiceLink = await tg("createInvoiceLink", {
+      title: "Express Mebel buyurtmasi",
+      description: order.items.map((i) => `${i.name} × ${i.qty}`).join(", ").slice(0, 255),
+      payload: orderRef.id,
+      provider_token: PAYMENT_PROVIDER_TOKEN.value(),
+      currency: "UZS",
+      prices: order.items.map((i) => ({ label: `${i.name} × ${i.qty}`.slice(0, 64), amount: i.price * i.qty * UZS_MINOR })),
+    });
+    return res.status(201).json({ ok: true, orderId: orderRef.id, total: order.total, invoiceLink });
+  } catch (err) {
+    logger.error("createInvoiceLink failed", err);
+    await releaseOrder(orderRef.id, ["awaiting_payment"], "To'lov oynasi ochilmadi");
+    throw new HttpError(502, "To'lov oynasini ochib bo'lmadi. Keyinroq urinib ko'ring yoki naqd tanlang.");
+  }
+}
+
+// Returns reserved stock of an unpaid order and marks it cancelled. Only orders whose status is in
+// `fromStatuses` are touched, so a paid order can never be released.
+async function releaseOrder(orderId, fromStatuses, reason) {
+  return db.runTransaction(async (t) => {
+    const ref = ordersCol.doc(orderId);
+    const snap = await t.get(ref);
+    if (!snap.exists || !fromStatuses.includes(snap.data().status)) return false;
+    const order = snap.data();
+    const refs = order.items.map((i) => productsCol.doc(i.id));
+    const products = await t.getAll(...refs);
+    products.forEach((p, i) => {
+      if (p.exists) moveStock(t, refs[i], p.data(), "release", order.items[i].qty, reason, "Tizim");
+    });
+    t.update(ref, { status: "cancelled", cancelledAt: Date.now(), cancelReason: reason });
+    return true;
+  });
+}
+
+async function notifyOrder(order) {
+  const lines = order.items.map((i) => `• ${escapeHtml(i.name)} × ${i.qty} = ${formatSum(i.price * i.qty)}`);
+  const who = order.telegramUserId
+    ? `${escapeHtml(order.name)}${order.telegramUsername ? ` (@${escapeHtml(order.telegramUsername)})` : ""}`
     : "—";
+  const { location } = order;
   const text = [
     "🛒 <b>Yangi buyurtma</b>",
     "",
     ...lines,
     "",
-    `<b>Jami:</b> ${formatSum(total)}`,
-    `<b>Turi:</b> ${body.orderType === "pickup" ? "Olib ketish" : "Yetkazib berish"}`,
-    `<b>Ism:</b> ${escapeHtml(String(body.name || "").slice(0, 100))}`,
-    `<b>Telefon:</b> ${escapeHtml(phone)}`,
-    body.address ? `<b>Manzil:</b> ${escapeHtml(String(body.address).slice(0, 300))}` : "",
+    `<b>Jami:</b> ${formatSum(order.total)}`,
+    `<b>To'lov:</b> ${order.payment === "card" ? "💳 Karta orqali — TO'LANGAN" : "💵 Qabul qilganda"}`,
+    `<b>Turi:</b> ${order.orderType === "pickup" ? "Olib ketish" : "Yetkazib berish"}`,
+    `<b>Ism:</b> ${escapeHtml(order.name)}`,
+    `<b>Telefon:</b> ${escapeHtml(order.phone)}`,
+    order.address ? `<b>Manzil:</b> ${escapeHtml(order.address)}` : "",
     location
       ? `<b>Xarita:</b> <a href="https://maps.google.com/?q=${location.lat},${location.lon}">Google</a> · <a href="https://yandex.uz/maps/?pt=${location.lon},${location.lat}&z=17&l=map">Yandex</a>`
       : "",
-    body.comment ? `<b>Izoh:</b> ${escapeHtml(String(body.comment).slice(0, 500))}` : "",
+    order.comment ? `<b>Izoh:</b> ${escapeHtml(order.comment)}` : "",
     `<b>Telegram:</b> ${who}`,
-    ...items
-      .filter((l) => l.product.stock <= 3)
-      .map((l) =>
-        l.product.stock
-          ? `⚠️ «${escapeHtml(l.product.name)}» omborda ${l.product.stock} ta qoldi`
-          : `⛔️ «${escapeHtml(l.product.name)}» tugadi — saytda sotuvdan chiqdi`,
-      ),
+    ...order.lowStock.map((l) =>
+      l.stock
+        ? `⚠️ «${escapeHtml(l.name)}» omborda ${l.stock} ta qoldi`
+        : `⛔️ «${escapeHtml(l.name)}» tugadi — saytda sotuvdan chiqdi`,
+    ),
   ]
     .filter((l) => l !== "")
     .join("\n");
@@ -498,17 +566,68 @@ async function handleOrder(req, res) {
         });
       }
     }
-    if (user) {
+    if (order.telegramUserId) {
+      const paid = order.payment === "card" ? "\n💳 To'lov qabul qilindi." : "";
       await tg("sendMessage", {
-        chat_id: user.id,
+        chat_id: order.telegramUserId,
         parse_mode: "HTML",
-        text: `✅ Buyurtmangiz qabul qilindi!\n\n${lines.join("\n")}\n\n<b>Jami:</b> ${formatSum(total)}\n\nTez orada operatorimiz siz bilan bog'lanadi.`,
+        text: `✅ Buyurtmangiz qabul qilindi!${paid}\n\n${lines.join("\n")}\n\n<b>Jami:</b> ${formatSum(order.total)}\n\nTez orada operatorimiz siz bilan bog'lanadi.`,
       });
     }
   } catch (err) {
     logger.error("order notification failed", err);
   }
-  res.status(201).json({ ok: true, total });
+}
+
+// Telegram asks before charging; it must be answered within 10 seconds.
+async function handlePreCheckout(query) {
+  const ok = await db.runTransaction(async (t) => {
+    const ref = ordersCol.doc(String(query.invoice_payload));
+    const snap = await t.get(ref);
+    const order = snap.data();
+    const valid =
+      snap.exists &&
+      order.status === "awaiting_payment" &&
+      order.telegramUserId === query.from.id &&
+      query.currency === "UZS" &&
+      query.total_amount === order.total * UZS_MINOR;
+    if (valid) t.update(ref, { status: "paying", payingAt: Date.now() });
+    return valid;
+  });
+  await tg("answerPreCheckoutQuery", {
+    pre_checkout_query_id: query.id,
+    ok,
+    ...(ok ? {} : { error_message: "Buyurtma muddati o'tgan yoki bekor qilingan. Iltimos, qaytadan buyurtma bering." }),
+  });
+}
+
+async function handleSuccessfulPayment(msg) {
+  const pay = msg.successful_payment;
+  const ref = ordersCol.doc(String(pay.invoice_payload));
+  const result = await db.runTransaction(async (t) => {
+    const snap = await t.get(ref);
+    if (!snap.exists) return null;
+    const order = snap.data();
+    if (order.status === "paid") return { order, duplicate: true };
+    // A payment can still land after the release job cancelled the order; keep the money's trail
+    // and tell the admins instead of silently re-reserving stock that may be gone.
+    const status = order.status === "cancelled" ? "paid_after_cancel" : "paid";
+    t.update(ref, {
+      status,
+      paidAt: Date.now(),
+      paidAmount: pay.total_amount / UZS_MINOR,
+      telegramChargeId: pay.telegram_payment_charge_id,
+      providerChargeId: pay.provider_payment_charge_id,
+    });
+    return { order: { ...order, status } };
+  });
+  if (!result || result.duplicate) return;
+  if (result.order.status === "paid") return notifyOrder(result.order);
+  const ordersChat = idList(ORDERS_CHAT_ID.value())[0] || idList(ADMIN_IDS.value())[0];
+  await tg("sendMessage", {
+    chat_id: ordersChat,
+    text: `⚠️ To'lov bron bekor qilingandan keyin keldi: buyurtma ${ref.id}, ${formatSum(result.order.total)}. Omborni tekshirib, mijoz bilan bog'laning.`,
+  });
 }
 
 async function route(req, res) {
@@ -520,7 +639,7 @@ async function route(req, res) {
 
   if (path === "/api/config" && method === "GET") {
     const { user, role } = await authenticate(req);
-    return res.json({ categories: CATEGORIES, role, user });
+    return res.json({ categories: CATEGORIES, role, user, cardPayments: cardsEnabled() });
   }
 
   if (path === "/api/products" && method === "GET") return res.json(await listProducts());
@@ -670,13 +789,23 @@ async function route(req, res) {
 
   if (path === "/api/orders" && method === "POST") return handleOrder(req, res);
 
+  // The buyer closed the payment window without paying: give the reserved stock back right away.
+  const cancelMatch = path.match(/^\/api\/orders\/([\w-]{1,64})\/cancel$/);
+  if (cancelMatch && method === "POST") {
+    const { user } = await authenticate(req);
+    const snap = await ordersCol.doc(cancelMatch[1]).get();
+    if (!user || !snap.exists || snap.data().telegramUserId !== user.id) throw new HttpError(404, "Buyurtma topilmadi");
+    await releaseOrder(cancelMatch[1], ["awaiting_payment"], "To'lov qilinmadi");
+    return res.json({ ok: true });
+  }
+
   throw new HttpError(404, "Topilmadi");
 }
 
 export const api = onRequest(
   {
-    region: "europe-west1",
-    secrets: [BOT_TOKEN],
+    region: REGION,
+    secrets: [BOT_TOKEN, PAYMENT_PROVIDER_TOKEN],
     invoker: "public",
     memory: "256MiB",
     maxInstances: 3,
@@ -690,6 +819,22 @@ export const api = onRequest(
       const status = err instanceof HttpError ? err.status : 500;
       if (status === 500) logger.error(err);
       if (!res.headersSent) res.status(status).json({ error: status === 500 ? "Xatolik yuz berdi" : err.message });
+    }
+  },
+);
+
+// Card orders that were never paid hold stock; return it after the payment window. "paying" means
+// Telegram approved the checkout but no payment arrived, so it gets a longer grace period.
+export const releaseUnpaid = onSchedule(
+  { schedule: "every 10 minutes", region: REGION },
+  async () => {
+    const now = Date.now();
+    const snap = await ordersCol.where("status", "in", ["awaiting_payment", "paying"]).get();
+    for (const doc of snap.docs) {
+      const { status, createdAt, payingAt } = doc.data();
+      const expired =
+        status === "awaiting_payment" ? createdAt < now - PAY_WINDOW_MS : payingAt < now - 2 * PAY_WINDOW_MS;
+      if (expired) await releaseOrder(doc.id, [status], "To'lov muddati o'tdi");
     }
   },
 );

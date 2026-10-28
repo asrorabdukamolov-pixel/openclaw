@@ -370,8 +370,16 @@ function checkoutDraft() {
     address: saved.address || "",
     comment: "",
     location: saved.location || null,
+    payment: canPayByCard() ? "card" : "cash",
   };
   return checkout;
+}
+
+// Card payments run through Telegram's invoice window (Bot API 6.1+), so they need the app opened in Telegram.
+const canPayByCard = () => Boolean(state.cardPayments && tg?.initData && tg.isVersionAtLeast?.("6.1"));
+
+function openInvoice(link) {
+  return new Promise((resolve) => tg.openInvoice(link, resolve));
 }
 
 // Telegram contact sharing (Bot API 6.9+): one tap instead of typing the number.
@@ -445,8 +453,17 @@ function checkoutSheet(body) {
           : ""
       }
       <label class="field">Izoh<textarea name="comment" rows="2" placeholder="Lift bor/yo'q, qulay vaqt...">${esc(d.comment)}</textarea></label>
+      ${
+        canPayByCard()
+          ? `<div class="field">To'lov usuli</div>
+            <div class="seg">
+              <button type="button" class="${d.payment === "card" ? "on" : ""}" data-pay="card">💳 Karta orqali</button>
+              <button type="button" class="${d.payment === "cash" ? "on" : ""}" data-pay="cash">💵 Qabul qilganda</button>
+            </div>`
+          : ""
+      }
       <div class="total"><span>Jami</span><span>${sum(total)} so'm</span></div>
-      <button class="btn" type="submit">Tasdiqlash</button>
+      <button class="btn" type="submit">${d.payment === "card" && canPayByCard() ? "To'lovga o'tish" : "Tasdiqlash"}</button>
     </form>`;
   const form = body.querySelector("form");
   form.oninput = (e) => {
@@ -458,6 +475,11 @@ function checkoutSheet(body) {
       state.orderType = seg.dataset.type;
       save("em_order_type", state.orderType);
       renderHeader();
+      return drawSheet();
+    }
+    const pay = e.target.closest("[data-pay]");
+    if (pay) {
+      d.payment = pay.dataset.pay;
       return drawSheet();
     }
     const auto = e.target.closest("[data-auto]")?.dataset.auto;
@@ -496,18 +518,32 @@ function checkoutSheet(body) {
     const data = Object.fromEntries(new FormData(e.target));
     const location = type === "delivery" ? d.location : null;
     save("em_checkout", { name: data.name, phone: data.phone, address: data.address, location });
+    const payment = canPayByCard() ? d.payment : "cash";
     btn.disabled = true;
     try {
-      await api("/api/orders", {
+      const order = await api("/api/orders", {
         method: "POST",
-        body: { ...data, location, orderType: type, items: cartLines().map((l) => ({ id: l.p.id, qty: l.qty })) },
+        body: { ...data, location, payment, orderType: type, items: cartLines().map((l) => ({ id: l.p.id, qty: l.qty })) },
       });
+      if (order.invoiceLink) {
+        const status = await openInvoice(order.invoiceLink);
+        // "pending" means the provider is still confirming: the bot's receipt arrives once it is paid.
+        if (status === "cancelled" || status === "failed") {
+          await api(`/api/orders/${order.orderId}/cancel`, { method: "POST" }).catch(() => {});
+          await reload().catch(() => {});
+          toast(status === "failed" ? "To'lov o'tmadi. Qaytadan urinib ko'ring" : "To'lov bekor qilindi");
+          btn.disabled = false;
+          return;
+        }
+        order.paid = status === "paid";
+        order.pending = status === "pending";
+      }
       tg?.HapticFeedback?.notificationOccurred("success");
       state.cart = {};
       save("em_cart", state.cart);
       checkout = null;
       renderCatalog();
-      sheetStack = [successSheet];
+      sheetStack = [successSheet(order)];
       drawSheet();
     } catch (err) {
       tg?.HapticFeedback?.notificationOccurred("error");
@@ -519,14 +555,21 @@ function checkoutSheet(body) {
   };
 }
 
-function successSheet(body) {
-  body.innerHTML = `<div style="text-align:center;padding:20px 0">
-      <div style="font-size:56px">✅</div>
-      <h3>Buyurtma qabul qilindi!</h3>
-      <p class="desc">Tez orada operatorimiz siz bilan bog'lanadi.</p>
-    </div>
-    <button class="btn" data-close>Yaxshi</button>`;
-  body.onclick = (e) => e.target.closest("[data-close]") && closeAll();
+function successSheet(order) {
+  const note = order.paid
+    ? "💳 To'lov qabul qilindi. Chek botga yuborildi."
+    : order.pending
+      ? "To'lov tasdiqlanmoqda. Tasdiqlangach, bot xabar beradi."
+      : "Tez orada operatorimiz siz bilan bog'lanadi.";
+  return (body) => {
+    body.innerHTML = `<div style="text-align:center;padding:20px 0">
+        <div style="font-size:56px">${order.pending ? "⏳" : "✅"}</div>
+        <h3>Buyurtma qabul qilindi!</h3>
+        <p class="desc">${note}</p>
+      </div>
+      <button class="btn" data-close>Yaxshi</button>`;
+    body.onclick = (e) => e.target.closest("[data-close]") && closeAll();
+  };
 }
 
 function orderTypeSheet(body) {
@@ -943,7 +986,8 @@ function staffSheet(body) {
 }
 
 // ---------- warehouse ----------
-const MOVE_LABEL = { in: "Kirim", out: "Chiqim", sale: "Sotuv" };
+const MOVE_LABEL = { in: "Kirim", out: "Chiqim", sale: "Sotuv", release: "Bron qaytdi" };
+const ADDS_STOCK = new Set(["in", "release"]);
 const when = (ts) =>
   new Date(ts).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
 
@@ -957,7 +1001,7 @@ function movementsHtml(list, withName) {
   return list
     .map(
       (m) => `<div class="move">
-        <span class="move-qty move-qty--${m.type === "in" ? "in" : "out"}">${m.type === "in" ? "+" : "−"}${m.qty}</span>
+        <span class="move-qty move-qty--${ADDS_STOCK.has(m.type) ? "in" : "out"}">${ADDS_STOCK.has(m.type) ? "+" : "−"}${m.qty}</span>
         <div>
           <div class="line-name">${MOVE_LABEL[m.type]}${withName ? ` · ${esc(m.productName)}` : ""}</div>
           <small>${when(m.at)} · ${esc(m.by)}${m.note ? ` · ${esc(m.note)}` : ""}</small>
@@ -1150,6 +1194,7 @@ async function reload() {
     const config = await api("/api/config");
     state.categories = config.categories;
     state.role = config.role;
+    state.cardPayments = config.cardPayments;
     await reload();
   } catch (err) {
     toast(err.message);
