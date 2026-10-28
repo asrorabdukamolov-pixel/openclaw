@@ -321,19 +321,23 @@ async function handleTelegramUpdate(req, res) {
 // One-time setup after deploy: registers the webhook and menu button, seeds an empty catalog.
 // Safe to call repeatedly; it only points the bot at this project's own URLs.
 async function handleSetup(res) {
-  const empty = (await productsCol.limit(1).get()).empty;
-  const noBanners = (await bannersCol.limit(1).get()).empty;
-  if (empty || noBanners) {
-    const batch = db.batch();
-    if (empty) {
+  // Sample data is added once per project; the marker keeps a catalog the admin emptied on
+  // purpose from refilling when setup is reopened (e.g. after a token change).
+  const seeded = await db.runTransaction(async (t) => {
+    const marker = db.collection("meta").doc("setup");
+    if ((await t.get(marker)).exists) return { products: false, banners: false };
+    const noProducts = (await t.get(productsCol.limit(1))).empty;
+    const noBanners = (await t.get(bannersCol.limit(1))).empty;
+    if (noProducts) {
       const seed = JSON.parse(readFileSync(new URL("./seed-products.json", import.meta.url), "utf8"));
-      for (const { id, ...p } of seed) batch.set(productsCol.doc(id), p);
+      for (const { id, ...p } of seed) t.set(productsCol.doc(id), p);
     }
     if (noBanners) {
-      for (const b of SEED_BANNERS) batch.set(bannersCol.doc(), cleanBanner(b));
+      for (const b of SEED_BANNERS) t.set(bannersCol.doc(), cleanBanner(b));
     }
-    await batch.commit();
-  }
+    t.set(marker, { seededAt: Date.now() });
+    return { products: noProducts, banners: noBanners };
+  });
   const webhook = `${WEBAPP_URL}/api/telegram`;
   let bot;
   try {
@@ -344,7 +348,7 @@ async function handleSetup(res) {
     // Most often a wrong BOT_TOKEN: Telegram answers "Unauthorized".
     throw new HttpError(502, `Telegram bilan ulanib bo'lmadi (${err.message}). BOT_TOKEN ni tekshiring.`);
   }
-  res.json({ ok: true, bot: `@${bot.username}`, webapp: WEBAPP_URL, webhook, seeded: empty, bannersSeeded: noBanners });
+  res.json({ ok: true, bot: `@${bot.username}`, webapp: WEBAPP_URL, webhook, seeded });
 }
 
 async function handleOrder(req, res) {
