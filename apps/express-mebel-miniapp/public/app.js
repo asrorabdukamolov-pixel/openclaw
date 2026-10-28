@@ -854,6 +854,94 @@ function bannerForm(existing) {
   };
 }
 
+// ---------- staff (admin) ----------
+const STAFF_ROLE_LABEL = { warehouse: "Omborchi" };
+
+function shareInvite(link) {
+  const text = "Express Mebel omborchisi sifatida qo'shilish uchun havolani bosing va botda Start ni bosing:";
+  const url = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(text)}`;
+  if (tg?.openTelegramLink) tg.openTelegramLink(url);
+  else window.open(url, "_blank");
+}
+
+function staffSheet(body) {
+  let invite = null;
+  const draw = (list) => {
+    body.innerHTML = `<h3>Xodimlar</h3>
+      <p class="hint" style="margin:-6px 0 14px">Omborchi taklif havolasini bosib, botda <b>Start</b> ni bossa, avtomatik qo'shiladi. Havola 24 soat va faqat bir marta ishlaydi.</p>
+      <button class="btn" data-invite style="margin-bottom:12px">＋ Omborchini taklif qilish</button>
+      ${
+        invite
+          ? `<div class="invite">
+              <div class="invite-link" id="inviteLink">${esc(invite.link)}</div>
+              <div class="row2">
+                <button class="btn" data-share>📤 Yuborish</button>
+                <button class="btn btn--ghost" data-copy>Nusxalash</button>
+              </div>
+              <small class="hint">Amal qiladi: ${when(invite.expiresAt)} gacha</small>
+            </div>`
+          : ""
+      }
+      <h4 class="sub">Omborchilar</h4>
+      <div>${
+        list === null
+          ? '<p class="empty">Yuklanmoqda…</p>'
+          : list.length
+            ? list
+                .map(
+                  (m) => `<div class="move">
+                    <span class="staff-avatar">${esc((m.name || "?")[0])}</span>
+                    <div>
+                      <div class="line-name">${esc(m.name)}${m.username ? ` <small>@${esc(m.username)}</small>` : ""}</div>
+                      <small>${STAFF_ROLE_LABEL[m.role] || m.role} · ${when(m.addedAt)}</small>
+                    </div>
+                    <button class="stock stock--zero" data-remove="${m.id}" data-name="${esc(m.name)}">O'chirish</button>
+                  </div>`,
+                )
+                .join("")
+            : '<p class="empty">Hali omborchi yo\'q</p>'
+      }</div>`;
+  };
+  const load = () =>
+    api("/api/staff")
+      .then(draw)
+      .catch((err) => toast(err.message));
+  draw(null);
+  load();
+  body.onclick = async (e) => {
+    if (e.target.closest("[data-invite]")) {
+      try {
+        invite = await api("/api/staff/invites", { method: "POST" });
+        haptic();
+        load();
+      } catch (err) {
+        toast(err.message);
+      }
+    }
+    if (e.target.closest("[data-share]")) shareInvite(invite.link);
+    if (e.target.closest("[data-copy]")) {
+      try {
+        await navigator.clipboard.writeText(invite.link);
+        toast("Nusxalandi");
+      } catch {
+        getSelection().selectAllChildren(body.querySelector("#inviteLink"));
+        toast("Havolani belgilab nusxalang");
+      }
+    }
+    const rm = e.target.closest("[data-remove]");
+    if (rm) {
+      if (!(await confirmDialog(`${rm.dataset.name} xodimlar ro'yxatidan o'chirilsinmi?`))) return;
+      try {
+        await api(`/api/staff/${rm.dataset.remove}`, { method: "DELETE" });
+        toast("O'chirildi");
+        load();
+      } catch (err) {
+        toast(err.message);
+      }
+    }
+  };
+}
+
 // ---------- warehouse ----------
 const MOVE_LABEL = { in: "Kirim", out: "Chiqim", sale: "Sotuv" };
 const when = (ts) =>
@@ -979,7 +1067,13 @@ function openDrawer() {
     ["type", "🚚  Buyurtma turi"],
     ...state.categories.map((c) => [`cat:${c.id}`, c.name]),
     ...(isStaff() ? [["stock", "📦  Ombor"]] : []),
-    ...(isAdmin() ? [["admin", "⚙️  Mahsulotlarni boshqarish"], ["banners", "🖼  Bannerlar va aksiyalar"]] : []),
+    ...(isAdmin()
+      ? [
+          ["admin", "⚙️  Mahsulotlarni boshqarish"],
+          ["banners", "🖼  Bannerlar va aksiyalar"],
+          ["staff", "👥  Xodimlar"],
+        ]
+      : []),
   ];
   $("#drawerNav").innerHTML = items.map(([k, label]) => `<button data-k="${k}">${label}</button>`).join("");
   $("#drawer").hidden = false;
@@ -1002,6 +1096,7 @@ $("#drawerNav").onclick = (e) => {
   if (k === "admin") openSheet(adminSheet);
   if (k === "stock") openSheet(warehouseSheet);
   if (k === "banners") openSheet(bannersSheet);
+  if (k === "staff") openSheet(staffSheet);
   if (k.startsWith("cat:")) document.querySelector(`[data-tab="${k.slice(4)}"]`)?.click();
 };
 

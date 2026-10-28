@@ -1127,3 +1127,33 @@ select {
   background: var(--card);
   color: var(--muted);
 }
+
+/* ---------- staff ---------- */
+.invite {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  margin-bottom: 8px;
+  border-radius: 18px;
+  background: var(--teal-soft);
+}
+
+.invite-link {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--white);
+  font-size: 14px;
+  word-break: break-all;
+  user-select: all;
+}
+
+.staff-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--ink);
+  color: var(--white);
+  font-weight: 700;
+}

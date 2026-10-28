@@ -29,7 +29,7 @@ Shriftlar: **Prompt Italic** (sarlavhalar) va **Montserrat** (matn). Bo'limlar: 
 | Rol | Kim | Nima qila oladi |
 | --- | --- | --- |
 | Admin | `ADMIN_IDS` | hamma narsa |
-| Ombor xodimi | `WAREHOUSE_IDS` | faqat kirim / chiqim |
+| Ombor xodimi | admin taklif qilgan (☰ → 👥 Xodimlar) | faqat kirim / chiqim |
 | Mijoz | boshqalar | katalog va buyurtma |
 
 ## Firebase'ga ulash (bir marta)
@@ -72,7 +72,6 @@ firebase deploy --project <ID>       # <ID> o'rniga loyiha ID si
 | --- | --- |
 | `BOT_TOKEN` | bot tokeni (ekranda ko'rinmaydi, bu normal) |
 | `ADMIN_IDS` | sizning ID'ingiz; bir nechta bo'lsa `111,222` |
-| `WAREHOUSE_IDS` | ombor xodimlari ID'lari yoki `-` |
 | `ORDERS_CHAT_ID` | buyurtmalar guruhi ID'si yoki `-` (birinchi adminga keladi) |
 
 API'larni yoqish haqida so'rasa — **Yes**. Birinchi deploy xato bilan tugasa (ruxsatlar hali tarqalmagan bo'ladi), 2–3 daqiqadan keyin `firebase deploy --project <ID>` ni qayta ishga tushiring.
@@ -84,9 +83,17 @@ Brauzerda oching: `https://<ID>.web.app/api/setup`
 `{"ok":true,"bot":"@...","seeded":true}` chiqsa — tayyor: bot webhook'i va **Katalog** menyu tugmasi o'rnatildi, katalog namunaviy mahsulotlar bilan to'ldirildi.
 Botga `/start` yozing → **🛋 Katalogni ochish**.
 
+## Omborchini qo'shish
+
+1. Admin: ☰ → **👥 Xodimlar** → **＋ Omborchini taklif qilish** → **📤 Yuborish** (yoki nusxalab, omborchiga jo'nating).
+2. Omborchi havolani bosadi → bot ochiladi → **Start**. Bot "✅ … omborchi sifatida qo'shildingiz" deb javob beradi, adminga ham xabar keladi.
+3. Omborchi ilovani ochadi → ☰ → **📦 Ombor**.
+
+Havola 24 soat va bir marta ishlaydi. Xodimni o'chirish: o'sha bo'limda **O'chirish**. Xodimlar Firestore `staff` kolleksiyasida saqlanadi.
+
 ## Keyin o'zgartirish
 
-- **Admin / ombor ID'lari, buyurtma chati**: Cloud Shell'da `functions/.env.<ID>` faylini tahrirlang (`nano functions/.env.<ID>`) → `firebase deploy --only functions --project <ID>`.
+- **Admin ID'lari, buyurtma chati**: Cloud Shell'da `functions/.env.<ID>` faylini tahrirlang (`nano functions/.env.<ID>`) → `firebase deploy --only functions --project <ID>`.
 - **Bot tokeni**: `firebase functions:secrets:set BOT_TOKEN --project <ID>` → `firebase deploy --only functions --project <ID>` → `/api/setup` ni qayta oching.
 - **Kod yangilansa**: `git pull` → `firebase deploy --project <ID>`.
 - Ma'lumotlarni Firebase konsolida ko'rish: **Firestore** → `products`, `stockMovements`, `orders`, `banners`.
@@ -95,7 +102,7 @@ Botga `/start` yozing → **🛋 Katalogni ochish**.
 
 ```bash
 cd functions && npm install && cd ..
-printf 'ADMIN_IDS=42\nWAREHOUSE_IDS=-\nORDERS_CHAT_ID=-\n' > functions/.env.local
+printf 'ADMIN_IDS=42\nORDERS_CHAT_ID=-\n' > functions/.env.local
 printf 'BOT_TOKEN=123:abc\n' > functions/.secret.local
 firebase emulators:start --project demo-express
 # http://127.0.0.1:5000  →  /api/setup katalogni to'ldiradi (Telegram qismi soxta token bilan xato beradi)
@@ -119,6 +126,9 @@ Hammasi `https://<ID>.web.app/api/...` ostida (Hosting → `api` funksiyasi, `eu
 | PUT / DELETE | `/api/banners/:id` | admin |
 | GET | `/api/stock?productId=` | admin, ombor |
 | POST | `/api/stock` | admin, ombor (`{ productId, type: "in" \| "out", qty, note }`) |
+| GET | `/api/staff` | admin |
+| POST | `/api/staff/invites` | admin (24 soatlik bir martalik havola) |
+| DELETE | `/api/staff/:telegramId` | admin |
 | GET | `/api/geocode?lat=&lon=` | hamma |
 | POST | `/api/orders` | hamma (qoldiqdan ko'p bo'lsa 409) |
 

@@ -4,8 +4,8 @@
 // Config (asked by `firebase deploy` on first run, stored in functions/.env.<project>):
 //   BOT_TOKEN      secret, Telegram bot token from @BotFather
 //   ADMIN_IDS      Telegram user ids allowed to manage products and stock (comma-separated)
-//   WAREHOUSE_IDS  Telegram user ids of warehouse staff (stock in/out only)
 //   ORDERS_CHAT_ID chat that receives orders (empty = first admin)
+// Warehouse staff join through one-time invite links from the admin panel (Firestore `staff`).
 
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -18,10 +18,6 @@ import { defineSecret, defineString } from "firebase-functions/params";
 
 const BOT_TOKEN = defineSecret("BOT_TOKEN");
 const ADMIN_IDS = defineString("ADMIN_IDS", { description: "Admin Telegram user ids, comma-separated" });
-const WAREHOUSE_IDS = defineString("WAREHOUSE_IDS", {
-  default: "-",
-  description: "Warehouse staff Telegram user ids, comma-separated ('-' for none)",
-});
 const ORDERS_CHAT_ID = defineString("ORDERS_CHAT_ID", {
   default: "-",
   description: "Chat id for new orders ('-' = first admin)",
@@ -33,6 +29,8 @@ const productsCol = db.collection("products");
 const movementsCol = db.collection("stockMovements");
 const ordersCol = db.collection("orders");
 const bannersCol = db.collection("banners");
+const staffCol = db.collection("staff");
+const invitesCol = db.collection("staffInvites");
 
 const PROJECT_ID = process.env.GCLOUD_PROJECT;
 const WEBAPP_URL = `https://${PROJECT_ID}.web.app`;
@@ -231,21 +229,19 @@ function sameSecret(a, b) {
   return ab.length === bb.length && timingSafeEqual(ab, bb);
 }
 
-function authenticate(req) {
+const isAdminId = (id) => idList(ADMIN_IDS.value()).includes(String(id));
+
+// Admins come from deploy config; everyone else's role is their `staff` document (invite links).
+async function authenticate(req) {
   const user = verifyInitData(req.get("x-telegram-init-data"));
-  const id = String(user?.id ?? "");
-  const role = !user
-    ? null
-    : idList(ADMIN_IDS.value()).includes(id)
-      ? "admin"
-      : idList(WAREHOUSE_IDS.value()).includes(id)
-        ? "warehouse"
-        : null;
-  return { user, role };
+  if (!user) return { user: null, role: null };
+  if (isAdminId(user.id)) return { user, role: "admin" };
+  const staff = await staffCol.doc(String(user.id)).get();
+  return { user, role: staff.exists ? staff.data().role : null };
 }
 
-function requireRole(req, ...roles) {
-  const auth = authenticate(req);
+async function requireRole(req, ...roles) {
+  const auth = await authenticate(req);
   if (!roles.includes(auth.role)) throw new HttpError(403, "Ruxsat yo'q");
   return auth;
 }
@@ -259,6 +255,17 @@ async function tg(method, body) {
   const json = await res.json();
   if (!json.ok) throw new Error(`${method}: ${json.description}`);
   return json.result;
+}
+
+let botUsername = null;
+function getBotUsername() {
+  botUsername ??= tg("getMe", {})
+    .then((bot) => bot.username)
+    .catch((err) => {
+      botUsername = null;
+      throw err;
+    });
+  return botUsername;
 }
 
 // Telegram echoes this in X-Telegram-Bot-Api-Secret-Token so only Telegram can call the webhook.
@@ -305,17 +312,62 @@ async function handleTelegramUpdate(req, res) {
   const header = req.get("x-telegram-bot-api-secret-token") || "";
   if (!sameSecret(header, webhookSecret())) throw new HttpError(403, "Forbidden");
   const msg = req.body?.message;
-  if (msg?.text?.startsWith("/start")) {
-    await tg("sendMessage", {
-      chat_id: msg.chat.id,
-      parse_mode: "HTML",
-      text:
-        "Assalomu alaykum! 👋\n\n<b>Express Mebel</b> — sifatli mebel tez yetkazib beriladi.\n" +
-        "Katalogni ochish uchun quyidagi tugmani bosing.",
-      reply_markup: { inline_keyboard: [[{ text: "🛋 Katalogni ochish", web_app: { url: WEBAPP_URL } }]] },
-    });
+  const invite = /^\/start inv_([a-f0-9]{24})$/.exec(msg?.text || "");
+  // Replies are best-effort: a failed send must not make Telegram retry an invite already used.
+  try {
+    if (invite && msg.chat.type === "private") {
+      await tg("sendMessage", { chat_id: msg.chat.id, parse_mode: "HTML", ...(await joinStaff(msg.from, invite[1])) });
+    } else if (msg?.text?.startsWith("/start")) {
+      await tg("sendMessage", {
+        chat_id: msg.chat.id,
+        parse_mode: "HTML",
+        text:
+          "Assalomu alaykum! 👋\n\n<b>Express Mebel</b> — sifatli mebel tez yetkazib beriladi.\n" +
+          "Katalogni ochish uchun quyidagi tugmani bosing.",
+        reply_markup: { inline_keyboard: [[{ text: "🛋 Katalogni ochish", web_app: { url: WEBAPP_URL } }]] },
+      });
+    }
+  } catch (err) {
+    logger.error("telegram update failed", err);
   }
   res.json({ ok: true });
+}
+
+const ROLE_LABEL = { warehouse: "omborchi" };
+const INVITE_TTL_MS = 24 * 60 * 60 * 1000;
+
+// Redeems a one-time invite: the Telegram account that opens it becomes staff with the invite's role.
+async function joinStaff(from, code) {
+  const openApp = { inline_keyboard: [[{ text: "🛋 Ilovani ochish", web_app: { url: WEBAPP_URL } }]] };
+  if (isAdminId(from.id)) {
+    return { text: "Siz allaqachon adminsiz, taklif kerak emas.", reply_markup: openApp };
+  }
+  const result = await db.runTransaction(async (t) => {
+    const ref = invitesCol.doc(code);
+    const snap = await t.get(ref);
+    const inv = snap.data();
+    if (!snap.exists || inv.usedAt || inv.expiresAt < Date.now()) return null;
+    t.set(staffCol.doc(String(from.id)), {
+      role: inv.role,
+      name: staffName(from),
+      username: from.username || "",
+      addedAt: Date.now(),
+      invitedBy: inv.createdBy,
+    });
+    t.update(ref, { usedAt: Date.now(), usedBy: from.id });
+    return inv;
+  });
+  if (!result) {
+    return { text: "⚠️ Taklif havolasi eskirgan yoki allaqachon ishlatilgan. Admindan yangisini so'rang." };
+  }
+  await tg("sendMessage", {
+    chat_id: result.createdBy,
+    text: `✅ ${staffName(from)}${from.username ? ` (@${from.username})` : ""} ${ROLE_LABEL[result.role]} sifatida qo'shildi.`,
+  }).catch((err) => logger.warn("invite notice failed", err));
+  return {
+    text: `✅ Siz Express Mebel'ga <b>${ROLE_LABEL[result.role]}</b> sifatida qo'shildingiz.\n\nIlovani oching → ☰ → 📦 Ombor.`,
+    reply_markup: openApp,
+  };
 }
 
 // One-time setup after deploy: registers the webhook and menu button, seeds an empty catalog.
@@ -352,7 +404,7 @@ async function handleSetup(res) {
 }
 
 async function handleOrder(req, res) {
-  const { user } = authenticate(req);
+  const { user } = await authenticate(req);
   const body = req.body || {};
   const phone = String(body.phone || "").trim();
   if (!/^\+?[\d\s()-]{7,20}$/.test(phone)) throw new HttpError(400, "Telefon raqam noto'g'ri");
@@ -467,14 +519,14 @@ async function route(req, res) {
   if (path === "/api/setup" && method === "GET") return handleSetup(res);
 
   if (path === "/api/config" && method === "GET") {
-    const { user, role } = authenticate(req);
+    const { user, role } = await authenticate(req);
     return res.json({ categories: CATEGORIES, role, user });
   }
 
   if (path === "/api/products" && method === "GET") return res.json(await listProducts());
 
   if (path === "/api/products" && method === "POST") {
-    const { user } = requireRole(req, "admin");
+    const { user } = await requireRole(req, "admin");
     const body = req.body || {};
     const ref = productsCol.doc();
     const product = cleanProduct(body);
@@ -494,7 +546,7 @@ async function route(req, res) {
       if (!snap.exists) throw new HttpError(404, "Mahsulot topilmadi");
       return res.json({ id: snap.id, ...snap.data() });
     }
-    requireRole(req, "admin");
+    await requireRole(req, "admin");
     if (method === "PUT") {
       const product = await db.runTransaction(async (t) => {
         const snap = await t.get(ref);
@@ -513,7 +565,7 @@ async function route(req, res) {
 
   if (path === "/api/banners" && method === "GET") {
     // Admins also get hidden banners so they can switch them back on.
-    const all = req.query.all === "1" && authenticate(req).role === "admin";
+    const all = req.query.all === "1" && (await authenticate(req)).role === "admin";
     const snap = await bannersCol.get();
     const list = snap.docs
       .map((d) => ({ id: d.id, ...d.data() }))
@@ -523,7 +575,7 @@ async function route(req, res) {
   }
 
   if (path === "/api/banners" && method === "POST") {
-    requireRole(req, "admin");
+    await requireRole(req, "admin");
     const ref = bannersCol.doc();
     const banner = cleanBanner(req.body || {});
     await ref.set(banner);
@@ -532,7 +584,7 @@ async function route(req, res) {
 
   const bannerMatch = path.match(/^\/api\/banners\/([\w-]{1,64})$/);
   if (bannerMatch && (method === "PUT" || method === "DELETE")) {
-    requireRole(req, "admin");
+    await requireRole(req, "admin");
     const ref = bannersCol.doc(bannerMatch[1]);
     if (method === "DELETE") {
       await ref.delete();
@@ -549,8 +601,31 @@ async function route(req, res) {
   }
 
   if (path === "/api/upload" && method === "POST") {
-    requireRole(req, "admin");
+    await requireRole(req, "admin");
     return res.status(201).json({ url: await saveImage(req.body?.dataUrl) });
+  }
+
+  if (path === "/api/staff" && method === "GET") {
+    await requireRole(req, "admin");
+    const snap = await staffCol.get();
+    const list = snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => b.addedAt - a.addedAt);
+    return res.json(list);
+  }
+
+  if (path === "/api/staff/invites" && method === "POST") {
+    const { user } = await requireRole(req, "admin");
+    const code = randomUUID().replace(/-/g, "").slice(0, 24);
+    const expiresAt = Date.now() + INVITE_TTL_MS;
+    await invitesCol.doc(code).set({ role: "warehouse", createdBy: user.id, createdAt: Date.now(), expiresAt });
+    const link = `https://t.me/${await getBotUsername()}?start=inv_${code}`;
+    return res.status(201).json({ link, expiresAt });
+  }
+
+  const staffMatch = path.match(/^\/api\/staff\/(\d{1,20})$/);
+  if (staffMatch && method === "DELETE") {
+    await requireRole(req, "admin");
+    await staffCol.doc(staffMatch[1]).delete();
+    return res.json({ ok: true });
   }
 
   if (path === "/api/geocode" && method === "GET") {
@@ -565,7 +640,7 @@ async function route(req, res) {
   }
 
   if (path === "/api/stock" && method === "GET") {
-    requireRole(req, "admin", "warehouse");
+    await requireRole(req, "admin", "warehouse");
     const productId = req.query.productId ? String(req.query.productId) : "";
     // Per-product history filters in memory to avoid a composite index (productId + at).
     const snap = productId
@@ -576,7 +651,7 @@ async function route(req, res) {
   }
 
   if (path === "/api/stock" && method === "POST") {
-    const { user } = requireRole(req, "admin", "warehouse");
+    const { user } = await requireRole(req, "admin", "warehouse");
     const body = req.body || {};
     if (body.type !== "in" && body.type !== "out") throw new HttpError(400, "Amal turi noto'g'ri");
     const qty = Number(body.qty);
