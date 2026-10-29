@@ -907,11 +907,12 @@ function bannerForm(existing) {
 // ---------- warehouse screens (admin) ----------
 function screensSheet(body) {
   let pairing = null;
+  let screenName = "Ombor ekrani";
   const screenUrl = `${location.origin}/ombor.html`;
   const draw = (list) => {
     body.innerHTML = `<h3>Ombor ekrani</h3>
       <p class="hint" style="margin:-6px 0 14px">Ombordagi kompyuter yoki planshetda brauzerni oching:<br><b>${esc(screenUrl)}</b><br>So'ng shu yerda olingan kodni kiriting.</p>
-      <label class="field">Ekran nomi<input id="screenName" maxlength="40" value="Ombor ekrani" /></label>
+      <label class="field">Ekran nomi<input id="screenName" maxlength="40" value="${esc(screenName)}" /></label>
       <button class="btn" data-code style="margin-bottom:12px">Kod olish</button>
       ${
         pairing
@@ -947,7 +948,8 @@ function screensSheet(body) {
   body.onclick = async (e) => {
     if (e.target.closest("[data-code]")) {
       try {
-        pairing = await api("/api/screens/pair-code", { method: "POST", body: { name: body.querySelector("#screenName").value } });
+        screenName = body.querySelector("#screenName").value;
+        pairing = await api("/api/screens/pair-code", { method: "POST", body: { name: screenName } });
         haptic();
         load();
       } catch (err) {
