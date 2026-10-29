@@ -878,6 +878,8 @@ select {
   display: flex;
   flex-direction: column;
   padding: calc(28px + var(--safe-top)) 22px 28px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   animation: slide 0.22s ease-out;
 }
 
