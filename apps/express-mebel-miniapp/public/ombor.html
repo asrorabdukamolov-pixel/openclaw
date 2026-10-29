@@ -32,9 +32,11 @@
         <div class="brand brand--light"><i></i><i></i><i></i><span>express<b>mebel</b></span></div>
         <nav class="tabs">
           <button class="on" data-view="board">📋 Buyurtmalar</button>
+          <button data-view="stock">📥 Kirim / Chiqim</button>
           <button data-view="labels">🏷 Etiketkalar</button>
         </nav>
         <div class="top-right">
+          <button class="sound" id="soundBtn" hidden>🔈 Ovozni yoqish</button>
           <span id="screenName"></span>
           <span class="dot" id="netDot" title="Aloqa"></span>
           <span id="clock"></span>
@@ -46,6 +48,41 @@
         <div class="col" data-stage="picking"><h2>📦 Yig'ilmoqda <span></span></h2><div class="cards"></div></div>
         <div class="col" data-stage="ready"><h2>✅ Tayyor <span></span></h2><div class="cards"></div></div>
         <div class="col" data-stage="shipped"><h2>🚚 Yo'lda (24 soat) <span></span></h2><div class="cards"></div></div>
+      </main>
+
+      <main class="stock-view" id="stockView" hidden>
+        <section class="stock-main">
+          <div class="mode" id="stockMode">
+            <button class="on" data-mode="in">📥 Kirim</button>
+            <button data-mode="out">📤 Chiqim</button>
+          </div>
+          <div class="scan-box">
+            <label for="stockScan">Qutilarni ketma-ket skanerlang</label>
+            <input id="stockScan" autocomplete="off" placeholder="Shtrix-kod" />
+            <input id="stockNote" autocomplete="off" placeholder="Izoh: sexdan keldi, partiya №…" />
+          </div>
+          <div class="flash" id="stockFlash" hidden></div>
+          <div class="session" id="session"></div>
+          <div class="session-actions">
+            <button class="btn" id="stockSave" disabled>Saqlash</button>
+            <button class="btn btn--ghost" id="stockClear">Tozalash</button>
+          </div>
+        </section>
+        <aside class="stock-side">
+          <div class="scan-box">
+            <h3>＋ Yangi mahsulot</h3>
+            <p>Bazada yo'q mahsulot keldimi? Qo'shing, etiketkasini chop eting va skanerlang. Narx va rasmni admin kiritadi; ungacha mahsulot saytda ko'rinmaydi.</p>
+            <form id="draftForm" class="draft-form">
+              <input name="name" required placeholder="Nomi: Shkaf-kupe «Nord» 3 eshikli" />
+              <select name="category" id="draftCategory" required></select>
+              <label>Qutilar soni (1 dona) <input name="boxes" type="number" min="1" max="20" value="1" required /></label>
+              <input name="size" placeholder="O'lcham: 180 × 60 × 240 sm" />
+              <input name="material" placeholder="Material: LDSP" />
+              <button class="btn" type="submit">Qo'shish</button>
+            </form>
+            <div class="flash" id="draftFlash" hidden></div>
+          </div>
+        </aside>
       </main>
 
       <main class="labels" id="labels" hidden>
@@ -78,7 +115,6 @@
       </div>
     </section>
 
-    <button class="sound" id="soundBtn" hidden>🔈 Ovozni yoqish</button>
     <script src="/ombor.js" type="module"></script>
   </body>
 </html>

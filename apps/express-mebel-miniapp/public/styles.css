@@ -1165,3 +1165,8 @@ select {
   letter-spacing: 4px;
   color: var(--ink);
 }
+
+.chip--draft {
+  background: #fff4e0;
+  color: #9a5b00;
+}

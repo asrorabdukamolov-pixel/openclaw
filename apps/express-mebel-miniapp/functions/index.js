@@ -102,12 +102,15 @@ async function saveImage(dataUrl) {
 function cleanProduct(input, existing = {}) {
   const name = String(input.name ?? existing.name ?? "").trim();
   const category = String(input.category ?? existing.category ?? "");
-  const price = Math.round(Number(input.price ?? existing.price));
+  // A draft is a product the warehouse registered; it stays off the catalog until an admin prices
+  // and publishes it, so only published products need a price.
+  const draft = Boolean(input.draft ?? existing.draft ?? false);
+  const price = Math.round(Number(input.price ?? existing.price ?? 0)) || 0;
   const oldPriceRaw = input.oldPrice ?? existing.oldPrice;
   const oldPrice = oldPriceRaw ? Math.round(Number(oldPriceRaw)) : null;
   if (!name) throw new HttpError(400, "Nomi kiritilmagan");
   if (!CATEGORY_IDS.has(category)) throw new HttpError(400, "Bo'lim noto'g'ri");
-  if (!Number.isFinite(price) || price <= 0) throw new HttpError(400, "Narx noto'g'ri");
+  if (price < 0 || (!draft && price <= 0)) throw new HttpError(400, "Narx kiritilmagan: saytda ko'rsatish uchun narx kerak");
   if (oldPrice !== null && (!Number.isFinite(oldPrice) || oldPrice <= price)) {
     throw new HttpError(400, "Eski narx joriy narxdan katta bo'lishi kerak");
   }
@@ -123,6 +126,7 @@ function cleanProduct(input, existing = {}) {
     size: String(input.size ?? existing.size ?? "").slice(0, 120),
     material: String(input.material ?? existing.material ?? "").slice(0, 120),
     isNew: Boolean(input.isNew ?? existing.isNew),
+    draft,
     // Packages per unit: each box gets its own barcode label and is scanned when picking.
     boxes: Math.min(20, Math.max(1, Math.round(Number(input.boxes ?? existing.boxes ?? 1)) || 1)),
     sku: existing.sku ?? null,
@@ -312,9 +316,19 @@ function reverseGeocode(lat, lon) {
 
 // ---------- routes ----------
 
-async function listProducts() {
+async function listProducts({ withDrafts = false } = {}) {
   const snap = await productsCol.get();
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => b.createdAt - a.createdAt);
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() }))
+    .filter((p) => withDrafts || !p.draft)
+    .sort((a, b) => b.createdAt - a.createdAt);
+}
+
+// Staff (admin, omborchi) and paired warehouse screens see drafts; buyers never do.
+async function isStaffRequest(req) {
+  if (await screenFromToken(req)) return true;
+  const { role } = await authenticate(req);
+  return role === "admin" || role === "warehouse";
 }
 
 async function handleTelegramUpdate(req, res) {
@@ -472,7 +486,7 @@ async function handleOrder(req, res) {
     const snaps = await t.getAll(...refs);
     const lines = snaps
       .map((snap, i) => ({ ref: refs[i], product: snap.exists ? snap.data() : null, qty: wanted[i].qty }))
-      .filter((l) => l.product);
+      .filter((l) => l.product && !l.product.draft);
     if (!lines.length) throw new HttpError(400, "Savat bo'sh");
     const short = lines.find((l) => l.qty > l.product.stock);
     if (short) {
@@ -845,6 +859,47 @@ async function handleCallback(q) {
   }
 }
 
+// Scanned receiving / write-off: `scans` maps a box label to how many times it was scanned. A unit
+// counts only when every one of its boxes is present, so a shkaf with a missing box is not stocked.
+async function applyScans(body, actor) {
+  if (body.type !== "in" && body.type !== "out") throw new HttpError(400, "Amal turi noto'g'ri");
+  const note = String(body.note || "").trim();
+  if (body.type === "out" && !note) throw new HttpError(400, "Chiqim sababini yozing");
+  const bySku = new Map();
+  for (const [code, rawCount] of Object.entries(body.scans || {})) {
+    const m = /^EM(\d{4,9})-(\d{1,2})$/i.exec(code);
+    const count = Math.floor(Number(rawCount));
+    if (!m || !(count > 0 && count <= 10000)) throw new HttpError(400, `Shtrix-kod noto'g'ri: ${code}`);
+    const boxes = bySku.get(Number(m[1])) || {};
+    boxes[Number(m[2])] = (boxes[Number(m[2])] || 0) + count;
+    bySku.set(Number(m[1]), boxes);
+  }
+  if (!bySku.size) throw new HttpError(400, "Hech narsa skanerlanmagan");
+  // Firestore "in" queries take at most 30 values.
+  if (bySku.size > 30) throw new HttpError(400, "Bir martada 30 xil mahsulotdan ko'p bo'lmasin");
+  return db.runTransaction(async (t) => {
+    const snap = await t.get(productsCol.where("sku", "in", [...bySku.keys()]));
+    const found = new Map(snap.docs.map((d) => [d.data().sku, d]));
+    const plan = [...bySku].map(([sku, boxes]) => {
+      const doc = found.get(sku);
+      if (!doc) throw new HttpError(400, `SKU ${sku} bazada yo'q`);
+      const p = doc.data();
+      const total = p.boxes ?? 1;
+      const extra = Object.keys(boxes).find((b) => Number(b) < 1 || Number(b) > total);
+      if (extra) throw new HttpError(400, `«${p.name}» da ${total} ta quti bor, ${extra}-quti noto'g'ri`);
+      const units = Math.min(...Array.from({ length: total }, (_, i) => boxes[i + 1] || 0));
+      if (body.type === "out" && units > p.stock) throw new HttpError(400, `«${p.name}» omborda faqat ${p.stock} ta bor`);
+      return { doc, p, units };
+    });
+    const results = plan.map(({ doc, p, units }) => {
+      if (units > 0) moveStock(t, doc.ref, p, body.type, units, note || "Skaner orqali kirim", actor);
+      return { id: doc.id, name: p.name, units, stock: p.stock };
+    });
+    if (results.every((r) => r.units === 0)) throw new HttpError(400, "Birorta ham to'liq to'plam yo'q: barcha qutilarni skanerlang");
+    return { results };
+  });
+}
+
 const PAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const PAIR_TTL_MS = 10 * 60 * 1000;
 
@@ -924,7 +979,36 @@ async function route(req, res) {
     return res.json({ categories: CATEGORIES, role, user, cardPayments: cardsEnabled() });
   }
 
-  if (path === "/api/products" && method === "GET") return res.json(await listProducts());
+  if (path === "/api/products" && method === "GET") {
+    const withDrafts = req.query.all === "1" && (await isStaffRequest(req));
+    return res.json(await listProducts({ withDrafts }));
+  }
+
+  if (path === "/api/products/draft" && method === "POST") {
+    const { actor } = await requireFulfillment(req);
+    const ref = productsCol.doc();
+    const body = req.body || {};
+    const product = cleanProduct({ ...body, draft: true, price: 0, oldPrice: null, isNew: false, images: [] });
+    await db.runTransaction(async (t) => {
+      const counters = (await t.get(countersRef)).data() || {};
+      product.sku = (counters.sku ?? FIRST_SKU) + 1;
+      t.set(countersRef, { sku: product.sku }, { merge: true });
+      t.set(ref, { ...product, createdBy: actor });
+    });
+    const admin = idList(ADMIN_IDS.value())[0];
+    if (admin) {
+      await tg("sendMessage", {
+        chat_id: admin,
+        text: `🆕 ${actor} yangi mahsulot qo'shdi: «${product.name}» (SKU ${product.sku}, ${product.boxes} quti).\nSaytda chiqishi uchun narx va rasmni kiriting: ☰ → ⚙️ Mahsulotlarni boshqarish.`,
+      }).catch((err) => logger.warn("draft notice failed", err));
+    }
+    return res.status(201).json({ id: ref.id, ...product });
+  }
+
+  if (path === "/api/stock/scan" && method === "POST") {
+    const { actor } = await requireFulfillment(req);
+    return res.status(201).json(await applyScans(req.body || {}, actor));
+  }
 
   if (path === "/api/products" && method === "POST") {
     const { user } = await requireRole(req, "admin");
@@ -947,7 +1031,7 @@ async function route(req, res) {
     const ref = productsCol.doc(match[1]);
     if (method === "GET") {
       const snap = await ref.get();
-      if (!snap.exists) throw new HttpError(404, "Mahsulot topilmadi");
+      if (!snap.exists || (snap.data().draft && !(await isStaffRequest(req)))) throw new HttpError(404, "Mahsulot topilmadi");
       return res.json({ id: snap.id, ...snap.data() });
     }
     await requireRole(req, "admin");
@@ -956,7 +1040,8 @@ async function route(req, res) {
         const snap = await t.get(ref);
         if (!snap.exists) throw new HttpError(404, "Mahsulot topilmadi");
         const next = cleanProduct(req.body || {}, snap.data());
-        t.set(ref, next);
+        // update, not set: keeps fields the form does not own (createdBy of warehouse drafts).
+        t.update(ref, next);
         return next;
       });
       return res.json({ id: ref.id, ...product });

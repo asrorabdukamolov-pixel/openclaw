@@ -136,10 +136,12 @@ function setupBanners() {
 }
 
 // ---------- catalog ----------
+// Staff load drafts too (for the admin and stock lists); the catalog never shows them.
 function visibleProducts() {
   const q = state.query.trim().toLowerCase();
-  if (!q) return state.products;
-  return state.products.filter((p) => `${p.name} ${p.description} ${p.material}`.toLowerCase().includes(q));
+  const published = state.products.filter((p) => !p.draft);
+  if (!q) return published;
+  return published.filter((p) => `${p.name} ${p.description} ${p.material}`.toLowerCase().includes(q));
 }
 
 function cardHtml(p) {
@@ -604,7 +606,7 @@ function adminSheet(body) {
         (p) => `<button class="admin-item" data-edit="${p.id}">
           <img src="${esc(cover(p))}" alt="" />
           <div><div class="line-name">${esc(p.name)}</div><small>${p.sku ? `SKU ${p.sku} · ` : ""}${sum(p.price)} so'm · omborda ${p.stock} ta</small></div>
-          <span class="chip">${catName[p.category] || p.category}</span>
+          <span class="chip ${p.draft ? "chip--draft" : ""}">${p.draft ? "Qoralama" : catName[p.category] || p.category}</span>
         </button>`,
       )
       .join("");
@@ -652,7 +654,7 @@ function productForm(id) {
           </select>
         </label>
         <div class="row2">
-          <label class="field">Narx (so'm)<input name="price" type="number" inputmode="numeric" min="1" required value="${p?.price ?? ""}" /></label>
+          <label class="field">Narx (so'm)<input name="price" type="number" inputmode="numeric" min="0" placeholder="saytda ko'rsatish uchun shart" value="${p?.price || ""}" /></label>
           <label class="field">Eski narx<input name="oldPrice" type="number" inputmode="numeric" min="0" placeholder="ixtiyoriy" value="${p?.oldPrice ?? ""}" /></label>
         </div>
         <div class="row2">
@@ -662,6 +664,7 @@ function productForm(id) {
         <label class="field">Qutilar soni (1 dona nechta qutida keladi)<input name="boxes" type="number" inputmode="numeric" min="1" max="20" required value="${p?.boxes ?? 1}" /></label>
         <label class="field">Tavsif<textarea name="description" rows="4">${esc(p?.description)}</textarea></label>
         <label class="check"><input type="checkbox" name="isNew" ${p?.isNew ? "checked" : ""} /> "Yangi" belgisi</label>
+        <label class="check"><input type="checkbox" name="published" ${p?.draft ? "" : "checked"} /> Saytda ko'rsatish${p?.draft ? " (ombor qo'shgan qoralama: narx va rasmni kiriting)" : ""}</label>
         ${
           p
             ? `<p class="field">Omborda: <b>${p.stock} ta</b>. Qoldiq "📦 Ombor" bo'limida kirim/chiqim orqali o'zgaradi.</p>`
@@ -730,6 +733,7 @@ function productForm(id) {
         boxes: Number(f.get("boxes")),
         description: f.get("description"),
         isNew: f.has("isNew"),
+        draft: !f.has("published"),
         stock: Number(f.get("stock") || 0),
         images,
       };
@@ -1250,7 +1254,8 @@ window.addEventListener("scroll", onScroll, { passive: true });
 
 // ---------- boot ----------
 async function reload() {
-  [state.products, state.banners] = await Promise.all([api("/api/products"), api("/api/banners")]);
+  const productsPath = isStaff() ? "/api/products?all=1" : "/api/products";
+  [state.products, state.banners] = await Promise.all([api(productsPath), api("/api/banners")]);
   renderBanners();
   renderCatalog();
   renderCartFab();

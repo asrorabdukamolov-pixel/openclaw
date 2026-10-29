@@ -7,7 +7,15 @@ const info = document.querySelector("#info");
 const esc = (s) => String(s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
 
 try {
-  const res = await fetch(`/api/products/${encodeURIComponent(params.get("id") || "")}`);
+  // Drafts are visible to paired screens only, so the screen's token goes along.
+  const token = (() => {
+    try {
+      return localStorage.getItem("em_screen_token") || "";
+    } catch {
+      return "";
+    }
+  })();
+  const res = await fetch(`/api/products/${encodeURIComponent(params.get("id") || "")}`, { headers: { "x-screen-token": token } });
   const p = await res.json();
   if (!res.ok) throw new Error(p.error || "Mahsulot topilmadi");
   if (!p.sku) throw new Error("Mahsulotda SKU yo'q: /api/setup ni bir marta oching");

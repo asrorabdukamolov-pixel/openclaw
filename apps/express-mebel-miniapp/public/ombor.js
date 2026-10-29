@@ -257,7 +257,7 @@ function renderLabels() {
     .filter((p) => !q || p.name.toLowerCase().includes(q) || String(p.sku).includes(q))
     .map(
       (p) => `<div class="label-row">
-        <div><b>${esc(p.name)}</b><br><small>SKU ${p.sku ?? "—"} · ${p.boxes ?? 1} quti</small></div>
+        <div><b>${esc(p.name)}</b> ${p.draft ? '<span class="chip chip--draft">Qoralama</span>' : ""}<br><small>SKU ${p.sku ?? "—"} · ${p.boxes ?? 1} quti · omborda ${p.stock}</small></div>
         <input type="number" min="1" max="200" value="1" aria-label="Necha dona" data-count="${p.id}" />
         <button class="btn" data-print="${p.id}" ${p.sku ? "" : "disabled"}>🏷 Chop etish</button>
       </div>`,
@@ -276,13 +276,163 @@ $("#labelList").onclick = (e) => {
 document.querySelector(".tabs").onclick = async (e) => {
   const view = e.target.closest("[data-view]")?.dataset.view;
   if (!view) return;
+  showView(view);
+};
+
+async function showView(view) {
   document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("on", b.dataset.view === view));
   $("#board").hidden = view !== "board";
   $("#labels").hidden = view !== "labels";
-  if (view === "labels") {
-    products = await api("/api/products").catch(() => []);
-    renderLabels();
+  $("#stockView").hidden = view !== "stock";
+  if (view === "board") return;
+  await loadProducts();
+  if (view === "labels") renderLabels();
+  if (view === "stock") {
+    renderSession();
+    $("#stockScan").focus();
   }
+}
+
+async function loadProducts() {
+  products = await api("/api/products?all=1").catch(() => products);
+}
+
+// ---------- receiving / write-off by scanner ----------
+let mode = "in";
+let session = {}; // box label -> times scanned in this session
+
+const bySku = () => new Map(products.filter((p) => p.sku).map((p) => [p.sku, p]));
+
+function sessionRows() {
+  const index = bySku();
+  const rows = new Map();
+  for (const [code, count] of Object.entries(session)) {
+    const [, sku, box] = /^EM(\d+)-(\d+)$/.exec(code);
+    const p = index.get(Number(sku));
+    const row = rows.get(p.id) || { p, boxes: {} };
+    row.boxes[Number(box)] = count;
+    rows.set(p.id, row);
+  }
+  return [...rows.values()].map((r) => {
+    const total = r.p.boxes ?? 1;
+    const counts = Array.from({ length: total }, (_, i) => r.boxes[i + 1] || 0);
+    return { ...r, total, counts, units: Math.min(...counts), max: Math.max(...counts) };
+  });
+}
+
+function renderSession() {
+  const rows = sessionRows();
+  $("#session").innerHTML = rows.length
+    ? rows
+        .map(
+          (r) => `<div class="session-row">
+            <div><b>${esc(r.p.name)}</b><br><small>SKU ${r.p.sku} · omborda ${r.p.stock}</small></div>
+            <div class="units">${mode === "in" ? "+" : "−"}${r.units} dona</div>
+            <div class="boxes">${r.counts.map((c, i) => `<span class="box-count">${i + 1}/${r.total}: ${c}</span>`).join("")}</div>
+            ${r.max > r.units ? `<div class="warn">⚠️ ${r.max - r.units} ta to'plam to'liq emas: yetishmayotgan qutilarni skanerlang</div>` : ""}
+          </div>`,
+        )
+        .join("")
+    : '<p class="empty">Skanerlangan quti yo\'q</p>';
+  const units = rows.reduce((n, r) => n + r.units, 0);
+  $("#stockSave").disabled = units === 0;
+  $("#stockSave").textContent = units ? `${mode === "in" ? "Kirimni" : "Chiqimni"} saqlash · ${units} dona` : "Saqlash";
+}
+
+function stockFlash(kind, text) {
+  const el = $("#stockFlash");
+  el.className = `flash ${kind}`;
+  el.textContent = text;
+  el.hidden = false;
+}
+
+$("#stockScan").onkeydown = (e) => {
+  if (e.key !== "Enter") return;
+  const code = e.target.value.trim().toUpperCase();
+  e.target.value = "";
+  if (!code) return;
+  const m = /^EM(\d{4,9})-(\d{1,2})$/.exec(code);
+  const p = m && bySku().get(Number(m[1]));
+  if (!m) return beep("bad"), stockFlash("bad", "✕ Shtrix-kod tanilmadi");
+  if (!p) return beep("bad"), stockFlash("bad", `✕ SKU ${m[1]} bazada yo'q`);
+  if (Number(m[2]) > (p.boxes ?? 1)) return beep("bad"), stockFlash("bad", `✕ «${p.name}» da ${p.boxes ?? 1} ta quti bor`);
+  session[code] = (session[code] || 0) + 1;
+  beep("ok");
+  stockFlash("ok", `✓ ${p.name}, ${m[2]}-quti`);
+  renderSession();
+};
+
+$("#stockMode").onclick = (e) => {
+  const next = e.target.closest("[data-mode]")?.dataset.mode;
+  if (!next) return;
+  mode = next;
+  $("#stockMode").className = `mode ${mode}`;
+  $("#stockMode").querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.mode === mode));
+  $("#stockNote").placeholder = mode === "in" ? "Izoh: sexdan keldi, partiya №…" : "Chiqim sababi (majburiy): brak, qaytarish…";
+  renderSession();
+  $("#stockScan").focus();
+};
+
+$("#stockClear").onclick = () => {
+  session = {};
+  $("#stockFlash").hidden = true;
+  renderSession();
+  $("#stockScan").focus();
+};
+
+$("#stockSave").onclick = async () => {
+  $("#stockSave").disabled = true;
+  try {
+    const { results } = await api("/api/stock/scan", { method: "POST", body: { type: mode, note: $("#stockNote").value, scans: session } });
+    const done = results.filter((r) => r.units > 0).map((r) => `${r.name}: ${mode === "in" ? "+" : "−"}${r.units} (qoldiq ${r.stock})`);
+    beep("done");
+    stockFlash("ok", `✅ Saqlandi. ${done.join("; ")}`);
+    session = {};
+    $("#stockNote").value = "";
+    await loadProducts();
+    renderSession();
+  } catch (err) {
+    beep("bad");
+    stockFlash("bad", `✕ ${err.message}`);
+    renderSession();
+  }
+  $("#stockScan").focus();
+};
+
+// ---------- new product (draft) ----------
+async function loadCategories() {
+  const { categories } = await api("/api/config");
+  $("#draftCategory").innerHTML = categories.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("");
+}
+
+$("#draftForm").onsubmit = async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const el = $("#draftFlash");
+  try {
+    const p = await api("/api/products/draft", {
+      method: "POST",
+      body: { name: f.get("name"), category: f.get("category"), boxes: Number(f.get("boxes")), size: f.get("size"), material: f.get("material") },
+    });
+    e.target.reset();
+    el.className = "flash ok";
+    el.innerHTML = `✅ «${esc(p.name)}» qo'shildi, SKU ${p.sku}.<br><button class="btn btn--dark" data-label="${p.id}" style="margin-top:10px">🏷 Etiketka chop etish</button>`;
+    el.hidden = false;
+    beep("ok");
+    await loadProducts();
+  } catch (err) {
+    el.className = "flash bad";
+    el.textContent = `✕ ${err.message}`;
+    el.hidden = false;
+    beep("bad");
+  }
+};
+
+$("#draftFlash").onclick = (e) => {
+  const id = e.target.closest("[data-label]")?.dataset.label;
+  if (!id) return;
+  const count = Math.max(1, Math.min(200, Number(prompt("Necha dona uchun etiketka?", "1")) || 1));
+  window.open(`/label.html?id=${encodeURIComponent(id)}&count=${count}`, "_blank");
 };
 
 // ---------- boot ----------
@@ -300,6 +450,7 @@ function start() {
   } catch {}
   tick();
   refresh();
+  loadCategories().catch(() => {});
   clearInterval(timer);
   timer = setInterval(() => {
     tick();

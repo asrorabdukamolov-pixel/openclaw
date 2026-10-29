@@ -132,6 +132,13 @@ qizil signal bilan rad etiladi. Shtrix-kod o'qilmasa, qutini ekranda bosib belgi
 Ekran har 5 soniyada yangilanadi, yangi buyurtma kelganda ovozli signal beradi (**🔈 Ovozni yoqish** bir marta bosiladi).
 Admin va omborchilar ham shu amallarni Telegram orqali bajarishi mumkin (API bir xil).
 
+4. **Skaner bilan kirim / chiqim:** ekranda **📥 Kirim / Chiqim** → rejim → qutilarni ketma-ket skanerlang → **Saqlash**.
+   Bir necha qutili mahsulot faqat **barcha qutilari** skanerlanganda 1 dona hisoblanadi; chala to'plam ogohlantiriladi
+   va hisobga kirmaydi. Chiqim uchun sabab majburiy, qoldiqdan ko'p chiqim rad etiladi. Qoldiq Telegram ilovada darhol yangilanadi.
+5. **Yangi mahsulot (ombor):** o'sha bo'limda **＋ Yangi mahsulot** → nom, bo'lim, qutilar soni → SKU beriladi →
+   **🏷 Etiketka chop etish** → skanerlab kirim. Mahsulot **qoralama**: mijozlarga ko'rinmaydi va sotilmaydi.
+   Adminga bot xabari keladi; admin narx va rasmni kiritib, **Saytda ko'rsatish** ni belgilaydi.
+
 Bu versiyani yuklagandan keyin `/api/setup` ni **qayta oching**: mavjud mahsulotlarga SKU beriladi va bot
 "Qabul qildim" tugmalarini qabul qiladigan bo'ladi.
 
@@ -184,6 +191,9 @@ Hammasi `https://<ID>.web.app/api/...` ostida (Hosting → `api` funksiyasi, `eu
 | POST | `/api/screens/pair-code` | admin (`{ name }` → 8 belgili kod) |
 | POST | `/api/screens/pair` | hamma (`{ code }` → ekran tokeni) |
 | GET / DELETE | `/api/screens`, `/api/screens/:id` | admin |
+| GET | `/api/products?all=1` | ekran tokeni, admin, omborchi (qoralamalar bilan) |
+| POST | `/api/products/draft` | ekran tokeni, admin, omborchi (`{ name, category, boxes, size, material }`) |
+| POST | `/api/stock/scan` | ekran tokeni, admin, omborchi (`{ type: "in" \| "out", note, scans: { "EM100013-1": 2, … } }`) |
 | GET | `/api/fulfillment` | ekran tokeni, admin, omborchi |
 | POST | `/api/fulfillment/:id/start` · `/pick` · `/ship` | ekran tokeni, admin, omborchi (`pick`: `{ code }` yoki `{ item, box }`) |
 | GET | `/api/geocode?lat=&lon=` | hamma |
