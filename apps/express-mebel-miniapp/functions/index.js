@@ -8,7 +8,7 @@
 //   PAYMENT_PROVIDER_TOKEN secret, Telegram Payments provider token from @BotFather ('-' = cards off)
 // Warehouse staff join through one-time invite links from the admin panel (Firestore `staff`).
 
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { initializeApp } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
@@ -34,6 +34,9 @@ const ordersCol = db.collection("orders");
 const bannersCol = db.collection("banners");
 const staffCol = db.collection("staff");
 const invitesCol = db.collection("staffInvites");
+const screensCol = db.collection("screens");
+const pairingsCol = db.collection("screenPairings");
+const countersRef = db.collection("meta").doc("counters");
 
 const PROJECT_ID = process.env.GCLOUD_PROJECT;
 const WEBAPP_URL = `https://${PROJECT_ID}.web.app`;
@@ -120,6 +123,9 @@ function cleanProduct(input, existing = {}) {
     size: String(input.size ?? existing.size ?? "").slice(0, 120),
     material: String(input.material ?? existing.material ?? "").slice(0, 120),
     isNew: Boolean(input.isNew ?? existing.isNew),
+    // Packages per unit: each box gets its own barcode label and is scanned when picking.
+    boxes: Math.min(20, Math.max(1, Math.round(Number(input.boxes ?? existing.boxes ?? 1)) || 1)),
+    sku: existing.sku ?? null,
     // Stock changes only through the warehouse journal; new products start at 0.
     stock: existing.stock ?? 0,
     images,
@@ -323,6 +329,10 @@ async function handleTelegramUpdate(req, res) {
     await handleSuccessfulPayment(msg);
     return res.json({ ok: true });
   }
+  if (req.body?.callback_query) {
+    await handleCallback(req.body.callback_query);
+    return res.json({ ok: true });
+  }
   const invite = /^\/start inv_([a-f0-9]{24})$/.exec(msg?.text || "");
   // Replies are best-effort: a failed send must not make Telegram retry an invite already used.
   try {
@@ -401,17 +411,34 @@ async function handleSetup(res) {
     t.set(marker, { seededAt: Date.now() });
     return { products: noProducts, banners: noBanners };
   });
+  await assignMissingSkus();
   const webhook = `${WEBAPP_URL}/api/telegram`;
   let bot;
   try {
     bot = await tg("getMe", {});
-    await tg("setWebhook", { url: webhook, secret_token: webhookSecret(), allowed_updates: ["message", "pre_checkout_query"] });
+    await tg("setWebhook", { url: webhook, secret_token: webhookSecret(), allowed_updates: ["message", "pre_checkout_query", "callback_query"] });
     await tg("setChatMenuButton", { menu_button: { type: "web_app", text: "Katalog", web_app: { url: WEBAPP_URL } } });
   } catch (err) {
     // Most often a wrong BOT_TOKEN: Telegram answers "Unauthorized".
     throw new HttpError(502, `Telegram bilan ulanib bo'lmadi (${err.message}). BOT_TOKEN ni tekshiring.`);
   }
   res.json({ ok: true, bot: `@${bot.username}`, webapp: WEBAPP_URL, webhook, seeded });
+}
+
+const FIRST_SKU = 100000;
+const FIRST_ORDER_NO = 1000;
+
+// Products created before barcodes existed get a SKU here; reopening setup is a no-op once all have one.
+async function assignMissingSkus() {
+  await db.runTransaction(async (t) => {
+    const counters = (await t.get(countersRef)).data() || {};
+    const missing = (await t.get(productsCol)).docs.filter((d) => d.data().sku == null);
+    if (!missing.length) return;
+    let sku = counters.sku ?? FIRST_SKU;
+    missing.sort((a, b) => a.data().createdAt - b.data().createdAt);
+    for (const d of missing) t.update(d.ref, { sku: ++sku, boxes: d.data().boxes ?? 1 });
+    t.set(countersRef, { sku }, { merge: true });
+  });
 }
 
 const REGION = "europe-west1";
@@ -440,6 +467,7 @@ async function handleOrder(req, res) {
 
   // Stock is reserved for card orders too, so the last unit cannot be sold twice while the buyer pays.
   const order = await db.runTransaction(async (t) => {
+    const counters = (await t.get(countersRef)).data() || {};
     const refs = wanted.map((it) => productsCol.doc(it.id));
     const snaps = await t.getAll(...refs);
     const lines = snaps
@@ -457,12 +485,23 @@ async function handleOrder(req, res) {
     }
     for (const l of lines) moveStock(t, l.ref, l.product, "sale", l.qty, "Buyurtma", buyer);
     const data = {
-      items: lines.map((l) => ({ id: l.ref.id, name: l.product.name, price: l.product.price, qty: l.qty })),
+      number: (counters.order ?? FIRST_ORDER_NO) + 1,
+      items: lines.map((l) => ({
+        id: l.ref.id,
+        name: l.product.name,
+        price: l.product.price,
+        qty: l.qty,
+        sku: l.product.sku ?? null,
+        boxes: l.product.boxes ?? 1,
+      })),
       total: lines.reduce((n, l) => n + l.product.price * l.qty, 0),
       lowStock: lines.filter((l) => l.product.stock <= 3).map((l) => ({ name: l.product.name, stock: l.product.stock })),
       orderType: body.orderType === "pickup" ? "pickup" : "delivery",
       payment,
       status: payment === "card" ? "awaiting_payment" : "new",
+      // Fulfillment stage: a card order reaches the warehouse screen only once it is paid.
+      stage: payment === "card" ? null : "new",
+      picked: {},
       name: String(body.name || "").slice(0, 100),
       phone,
       address: String(body.address || "").slice(0, 300),
@@ -472,6 +511,7 @@ async function handleOrder(req, res) {
       telegramUsername: user?.username ?? "",
       createdAt: Date.now(),
     };
+    t.set(countersRef, { order: data.number }, { merge: true });
     t.set(orderRef, data);
     return data;
   });
@@ -522,7 +562,7 @@ async function notifyOrder(order) {
     : "—";
   const { location } = order;
   const text = [
-    "🛒 <b>Yangi buyurtma</b>",
+    `🛒 <b>Yangi buyurtma #${order.number}</b>`,
     "",
     ...lines,
     "",
@@ -571,7 +611,7 @@ async function notifyOrder(order) {
       await tg("sendMessage", {
         chat_id: order.telegramUserId,
         parse_mode: "HTML",
-        text: `✅ Buyurtmangiz qabul qilindi!${paid}\n\n${lines.join("\n")}\n\n<b>Jami:</b> ${formatSum(order.total)}\n\nTez orada operatorimiz siz bilan bog'lanadi.`,
+        text: `✅ Buyurtmangiz #${order.number} qabul qilindi!${paid}\n\n${lines.join("\n")}\n\n<b>Jami:</b> ${formatSum(order.total)}\n\nTez orada operatorimiz siz bilan bog'lanadi.`,
       });
     }
   } catch (err) {
@@ -614,6 +654,7 @@ async function handleSuccessfulPayment(msg) {
     const status = order.status === "cancelled" ? "paid_after_cancel" : "paid";
     t.update(ref, {
       status,
+      ...(status === "paid" ? { stage: "new", stageAt: Date.now() } : {}),
       paidAt: Date.now(),
       paidAmount: pay.total_amount / UZS_MINOR,
       telegramChargeId: pay.telegram_payment_charge_id,
@@ -628,6 +669,247 @@ async function handleSuccessfulPayment(msg) {
     chat_id: ordersChat,
     text: `⚠️ To'lov bron bekor qilingandan keyin keldi: buyurtma ${ref.id}, ${formatSum(result.order.total)}. Omborni tekshirib, mijoz bilan bog'laning.`,
   });
+}
+
+// ---------- fulfillment (warehouse screen) ----------
+
+const ACTIVE_STAGES = ["new", "picking", "ready", "shipped"];
+const AUTO_CLOSE_MS = 5 * 24 * 60 * 60 * 1000;
+const boxCode = (sku, box) => `EM${sku}-${box}`;
+const boxesNeeded = (order) => order.items.reduce((n, i) => n + i.qty * (i.boxes ?? 1), 0);
+const boxesPicked = (order) => Object.values(order.picked || {}).reduce((n, c) => n + c, 0);
+
+// Screens are browser pages paired once with a code from the admin panel; they hold a long token
+// whose SHA-256 names their `screens` document, so the database never stores the token itself.
+const tokenId = (token) => createHash("sha256").update(token).digest("hex");
+
+async function screenFromToken(req) {
+  const token = req.get("x-screen-token");
+  if (!token || token.length < 32) return null;
+  const snap = await screensCol.doc(tokenId(token)).get();
+  return snap.exists ? { id: snap.id, ...snap.data() } : null;
+}
+
+async function requireFulfillment(req) {
+  const screen = await screenFromToken(req);
+  if (screen) return { actor: `🖥 ${screen.name}` };
+  const { user, role } = await authenticate(req);
+  if (role !== "admin" && role !== "warehouse") throw new HttpError(403, "Ruxsat yo'q");
+  return { actor: staffName(user) };
+}
+
+function fulfillmentView(id, o) {
+  return {
+    id,
+    number: o.number ?? null,
+    stage: o.stage,
+    stageAt: o.stageAt ?? o.createdAt,
+    createdAt: o.createdAt,
+    orderType: o.orderType,
+    payment: o.payment,
+    name: o.name,
+    phone: o.phone,
+    address: o.address,
+    comment: o.comment,
+    items: o.items.map((i) => ({ name: i.name, qty: i.qty, sku: i.sku, boxes: i.boxes ?? 1 })),
+    picked: o.picked || {},
+    boxesNeeded: boxesNeeded(o),
+    boxesPicked: boxesPicked(o),
+  };
+}
+
+const ORDER_LABEL = (o) => (o.number ? `#${o.number}` : "");
+
+// Every stage change is announced to the buyer; shipped also carries the accept / problem buttons.
+async function notifyStage(id, o) {
+  if (!o.telegramUserId) return;
+  const no = ORDER_LABEL(o);
+  const pickup = o.orderType === "pickup";
+  const text = {
+    picking: `📦 Buyurtmangiz ${no} omborda yig'ilmoqda.`,
+    ready: pickup
+      ? `✅ Buyurtmangiz ${no} tayyor, do'kondan olib ketishingiz mumkin.`
+      : `✅ Buyurtmangiz ${no} yig'ildi va jo'natishga tayyor.`,
+    shipped: pickup
+      ? `🏬 Buyurtmangiz ${no} sizga topshirildi. Hammasi joyidami?`
+      : `🚚 Buyurtmangiz ${no} yo'lga chiqdi! Qabul qilganingizda pastdagi tugmani bosing.`,
+    delivered: `🎉 Rahmat! Buyurtma ${no} yakunlandi. Express Mebel'ni tanlaganingiz uchun rahmat.`,
+  }[o.stage];
+  if (!text) return;
+  const buttons =
+    o.stage === "shipped"
+      ? {
+          inline_keyboard: [
+            [{ text: "✅ Qabul qildim", callback_data: `acc:${id}` }],
+            [{ text: "⚠️ Muammo bor", callback_data: `prob:${id}` }],
+          ],
+        }
+      : undefined;
+  await tg("sendMessage", { chat_id: o.telegramUserId, text, reply_markup: buttons }).catch((err) =>
+    logger.warn("stage notice failed", err),
+  );
+}
+
+// Moves an order between stages inside a transaction; `allowed` is the stage it must currently be in.
+async function setStage(id, allowed, next, patch = {}) {
+  const ref = ordersCol.doc(id);
+  const order = await db.runTransaction(async (t) => {
+    const snap = await t.get(ref);
+    if (!snap.exists) throw new HttpError(404, "Buyurtma topilmadi");
+    const o = snap.data();
+    if (!allowed.includes(o.stage)) throw new HttpError(409, "Buyurtma bu bosqichda emas, ekranni yangilang");
+    const update = { stage: next, stageAt: Date.now(), [`${next}At`]: Date.now(), ...patch };
+    t.update(ref, update);
+    return { ...o, ...update };
+  });
+  await notifyStage(id, order);
+  return order;
+}
+
+// One scan (or a manual tick) adds one box; the order turns "ready" the moment every box is in.
+async function pickBox(id, body, actor) {
+  const ref = ordersCol.doc(id);
+  const result = await db.runTransaction(async (t) => {
+    const snap = await t.get(ref);
+    if (!snap.exists) throw new HttpError(404, "Buyurtma topilmadi");
+    const o = snap.data();
+    if (o.stage !== "picking") throw new HttpError(409, "Avval yig'ishni boshlang");
+    let index;
+    let box;
+    const scanned = /^EM(\d{4,9})-(\d{1,2})$/i.exec(String(body.code || "").trim());
+    if (scanned) {
+      const sku = Number(scanned[1]);
+      box = Number(scanned[2]);
+      index = o.items.findIndex((i) => i.sku === sku);
+      if (index === -1) throw new HttpError(409, "Bu mahsulot shu buyurtmada yo'q");
+    } else if (body.code) {
+      throw new HttpError(400, "Shtrix-kod tanilmadi");
+    } else {
+      index = Number(body.item);
+      box = Number(body.box);
+      if (!o.items[index]) throw new HttpError(400, "Mahsulot noto'g'ri");
+    }
+    const item = o.items[index];
+    if (!(box >= 1 && box <= (item.boxes ?? 1))) throw new HttpError(409, `Bu mahsulotda ${item.boxes ?? 1} ta quti bor`);
+    const key = `${index}-${box}`;
+    const count = (o.picked || {})[key] || 0;
+    if (count >= item.qty) throw new HttpError(409, `«${item.name}» ${box}-qutisi allaqachon skanerlangan`);
+    const picked = { ...(o.picked || {}), [key]: count + 1 };
+    const next = { ...o, picked };
+    const done = boxesPicked(next) >= boxesNeeded(next);
+    const update = { picked, lastPickBy: actor, ...(done ? { stage: "ready", stageAt: Date.now(), readyAt: Date.now() } : {}) };
+    t.update(ref, update);
+    return { order: { ...o, ...update }, item: item.name, box, done };
+  });
+  if (result.done) await notifyStage(id, result.order);
+  return result;
+}
+
+async function handleCallback(q) {
+  const [action, id] = String(q.data || "").split(":");
+  let answer = "";
+  // The buttons go away once the buyer's order is closed, whoever's press closed it.
+  let closeButtons = false;
+  try {
+    const snap = await ordersCol.doc(id || "-").get();
+    const o = snap.data();
+    if (!snap.exists || o.telegramUserId !== q.from.id) {
+      answer = "Buyurtma topilmadi";
+    } else if (o.stage !== "shipped") {
+      answer = "Bu buyurtma allaqachon yopilgan";
+      closeButtons = true;
+    } else if (action === "acc") {
+      await setStage(id, ["shipped"], "delivered");
+      answer = "Rahmat! Buyurtma yakunlandi";
+      closeButtons = true;
+    } else if (action === "prob") {
+      await setStage(id, ["shipped"], "problem");
+      answer = "Operator tez orada bog'lanadi";
+      closeButtons = true;
+      const chat = idList(ORDERS_CHAT_ID.value())[0] || idList(ADMIN_IDS.value())[0];
+      await tg("sendMessage", {
+        chat_id: chat,
+        text: `⚠️ Mijoz ${ORDER_LABEL(o)} buyurtma bo'yicha muammo bildirdi.\n${o.name}, ${o.phone}\nMijoz bilan bog'laning.`,
+      });
+      await tg("sendMessage", { chat_id: q.from.id, text: "Xabaringiz qabul qilindi. Operatorimiz tez orada siz bilan bog'lanadi." });
+    }
+    if (q.message && closeButtons) {
+      await tg("editMessageReplyMarkup", {
+        chat_id: q.message.chat.id,
+        message_id: q.message.message_id,
+        reply_markup: { inline_keyboard: [] },
+      }).catch(() => {});
+    }
+  } finally {
+    await tg("answerCallbackQuery", { callback_query_id: q.id, text: answer }).catch(() => {});
+  }
+}
+
+const PAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const PAIR_TTL_MS = 10 * 60 * 1000;
+
+async function handleFulfillment(req, res, path, method) {
+  if (path === "/api/screens/pair-code" && method === "POST") {
+    const { user } = await requireRole(req, "admin");
+    const code = Array.from({ length: 8 }, () => PAIR_ALPHABET[randomInt(PAIR_ALPHABET.length)]).join("");
+    const name = String(req.body?.name || "Ombor ekrani").trim().slice(0, 40) || "Ombor ekrani";
+    const expiresAt = Date.now() + PAIR_TTL_MS;
+    await pairingsCol.doc(code).set({ name, createdBy: user.id, expiresAt });
+    return res.status(201).json({ code: `${code.slice(0, 4)}-${code.slice(4)}`, expiresAt });
+  }
+  if (path === "/api/screens/pair" && method === "POST") {
+    const code = String(req.body?.code || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (code.length !== 8) throw new HttpError(400, "Kod noto'g'ri");
+    const token = randomUUID() + randomUUID();
+    const name = await db.runTransaction(async (t) => {
+      const ref = pairingsCol.doc(code);
+      const snap = await t.get(ref);
+      if (!snap.exists || snap.data().expiresAt < Date.now()) return null;
+      t.delete(ref);
+      t.set(screensCol.doc(tokenId(token)), { name: snap.data().name, createdBy: snap.data().createdBy, createdAt: Date.now() });
+      return snap.data().name;
+    });
+    if (!name) throw new HttpError(400, "Kod noto'g'ri yoki muddati o'tgan");
+    return res.status(201).json({ token, name });
+  }
+  if (path === "/api/screens" && method === "GET") {
+    await requireRole(req, "admin");
+    const snap = await screensCol.get();
+    return res.json(snap.docs.map((d) => ({ id: d.id, name: d.data().name, createdAt: d.data().createdAt })));
+  }
+  const screenMatch = path.match(/^\/api\/screens\/([a-f0-9]{64})$/);
+  if (screenMatch && method === "DELETE") {
+    await requireRole(req, "admin");
+    await screensCol.doc(screenMatch[1]).delete();
+    return res.json({ ok: true });
+  }
+
+  if (path === "/api/fulfillment" && method === "GET") {
+    await requireFulfillment(req);
+    const snap = await ordersCol.where("stage", "in", ACTIVE_STAGES).get();
+    const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+    const list = snap.docs
+      .map((d) => fulfillmentView(d.id, d.data()))
+      .filter((o) => o.stage !== "shipped" || o.stageAt > dayAgo)
+      .sort((a, b) => a.createdAt - b.createdAt);
+    return res.json(list);
+  }
+  const m = path.match(/^\/api\/fulfillment\/([\w-]{1,64})\/(start|pick|ship)$/);
+  if (m && method === "POST") {
+    const { actor } = await requireFulfillment(req);
+    const [, id, action] = m;
+    if (action === "start") {
+      const o = await setStage(id, ["new"], "picking", { pickingBy: actor });
+      return res.json(fulfillmentView(id, o));
+    }
+    if (action === "ship") {
+      const o = await setStage(id, ["ready"], "shipped", { shippedBy: actor });
+      return res.json(fulfillmentView(id, o));
+    }
+    const r = await pickBox(id, req.body || {}, actor);
+    return res.json({ ...fulfillmentView(id, r.order), scanned: { item: r.item, box: r.box } });
+  }
+  return null;
 }
 
 async function route(req, res) {
@@ -651,6 +933,9 @@ async function route(req, res) {
     const product = cleanProduct(body);
     const initial = Math.min(Math.floor(Number(body.stock)) || 0, 100000);
     await db.runTransaction(async (t) => {
+      const counters = (await t.get(countersRef)).data() || {};
+      product.sku = (counters.sku ?? FIRST_SKU) + 1;
+      t.set(countersRef, { sku: product.sku }, { merge: true });
       t.set(ref, product);
       if (initial > 0) moveStock(t, ref, product, "in", initial, "Boshlang'ich qoldiq", staffName(user));
     });
@@ -789,6 +1074,11 @@ async function route(req, res) {
 
   if (path === "/api/orders" && method === "POST") return handleOrder(req, res);
 
+  if (path.startsWith("/api/fulfillment") || path.startsWith("/api/screens")) {
+    const handled = await handleFulfillment(req, res, path, method);
+    if (handled !== null) return handled;
+  }
+
   // The buyer closed the payment window without paying: give the reserved stock back right away.
   const cancelMatch = path.match(/^\/api\/orders\/([\w-]{1,64})\/cancel$/);
   if (cancelMatch && method === "POST") {
@@ -835,6 +1125,19 @@ export const releaseUnpaid = onSchedule(
       const expired =
         status === "awaiting_payment" ? createdAt < now - PAY_WINDOW_MS : payingAt < now - 2 * PAY_WINDOW_MS;
       if (expired) await releaseOrder(doc.id, [status], "To'lov muddati o'tdi");
+    }
+  },
+);
+
+// Buyers often forget "Qabul qildim"; shipped orders close themselves after a few days.
+export const closeShipped = onSchedule(
+  { schedule: "every 6 hours", region: REGION, secrets: [BOT_TOKEN] },
+  async () => {
+    const cutoff = Date.now() - AUTO_CLOSE_MS;
+    const snap = await ordersCol.where("stage", "==", "shipped").get();
+    for (const doc of snap.docs) {
+      if (doc.data().stageAt >= cutoff) continue;
+      await setStage(doc.id, ["shipped"], "delivered", { autoClosed: true }).catch((err) => logger.warn("auto close failed", err));
     }
   },
 );

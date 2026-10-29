@@ -1157,3 +1157,11 @@ select {
   color: var(--white);
   font-weight: 700;
 }
+
+.pair-code {
+  font-family: var(--font-lat);
+  font-weight: 600;
+  font-size: 40px;
+  letter-spacing: 4px;
+  color: var(--ink);
+}

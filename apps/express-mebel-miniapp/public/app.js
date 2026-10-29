@@ -283,6 +283,7 @@ function productSheet(id) {
       <dl class="specs">
         ${p.size ? `<dt>O'lcham</dt><dd>${esc(p.size)}</dd>` : ""}
         ${p.material ? `<dt>Material</dt><dd>${esc(p.material)}</dd>` : ""}
+        ${(p.boxes ?? 1) > 1 ? `<dt>Qadoq</dt><dd>${p.boxes} ta qutida</dd>` : ""}
         <dt>Holati</dt><dd>${stockLabel(p)}</dd>
       </dl>
       ${p.description ? `<p class="desc">${esc(p.description)}</p>` : ""}
@@ -602,7 +603,7 @@ function adminSheet(body) {
       .map(
         (p) => `<button class="admin-item" data-edit="${p.id}">
           <img src="${esc(cover(p))}" alt="" />
-          <div><div class="line-name">${esc(p.name)}</div><small>${sum(p.price)} so'm · omborda ${p.stock} ta</small></div>
+          <div><div class="line-name">${esc(p.name)}</div><small>${p.sku ? `SKU ${p.sku} · ` : ""}${sum(p.price)} so'm · omborda ${p.stock} ta</small></div>
           <span class="chip">${catName[p.category] || p.category}</span>
         </button>`,
       )
@@ -658,6 +659,7 @@ function productForm(id) {
           <label class="field">O'lcham<input name="size" placeholder="120 × 60 × 75 sm" value="${esc(p?.size)}" /></label>
           <label class="field">Material<input name="material" placeholder="LDSP, MDF" value="${esc(p?.material)}" /></label>
         </div>
+        <label class="field">Qutilar soni (1 dona nechta qutida keladi)<input name="boxes" type="number" inputmode="numeric" min="1" max="20" required value="${p?.boxes ?? 1}" /></label>
         <label class="field">Tavsif<textarea name="description" rows="4">${esc(p?.description)}</textarea></label>
         <label class="check"><input type="checkbox" name="isNew" ${p?.isNew ? "checked" : ""} /> "Yangi" belgisi</label>
         ${
@@ -725,6 +727,7 @@ function productForm(id) {
         oldPrice: f.get("oldPrice") ? Number(f.get("oldPrice")) : null,
         size: f.get("size"),
         material: f.get("material"),
+        boxes: Number(f.get("boxes")),
         description: f.get("description"),
         isNew: f.has("isNew"),
         stock: Number(f.get("stock") || 0),
@@ -894,6 +897,70 @@ function bannerForm(existing) {
         btn.disabled = false;
       }
     };
+  };
+}
+
+// ---------- warehouse screens (admin) ----------
+function screensSheet(body) {
+  let pairing = null;
+  const screenUrl = `${location.origin}/ombor.html`;
+  const draw = (list) => {
+    body.innerHTML = `<h3>Ombor ekrani</h3>
+      <p class="hint" style="margin:-6px 0 14px">Ombordagi kompyuter yoki planshetda brauzerni oching:<br><b>${esc(screenUrl)}</b><br>So'ng shu yerda olingan kodni kiriting.</p>
+      <label class="field">Ekran nomi<input id="screenName" maxlength="40" value="Ombor ekrani" /></label>
+      <button class="btn" data-code style="margin-bottom:12px">Kod olish</button>
+      ${
+        pairing
+          ? `<div class="invite" style="text-align:center">
+              <div class="pair-code">${esc(pairing.code)}</div>
+              <small class="hint">Kod 10 daqiqa amal qiladi (${when(pairing.expiresAt)} gacha) va bir marta ishlatiladi</small>
+            </div>`
+          : ""
+      }
+      <h4 class="sub">Ulangan ekranlar</h4>
+      <div>${
+        list === null
+          ? '<p class="empty">Yuklanmoqda…</p>'
+          : list.length
+            ? list
+                .map(
+                  (sc) => `<div class="move">
+                    <span class="staff-avatar">🖥</span>
+                    <div><div class="line-name">${esc(sc.name)}</div><small>Ulangan: ${when(sc.createdAt)}</small></div>
+                    <button class="stock stock--zero" data-unpair="${sc.id}" data-name="${esc(sc.name)}">Uzish</button>
+                  </div>`,
+                )
+                .join("")
+            : '<p class="empty">Hali ekran ulanmagan</p>'
+      }</div>`;
+  };
+  const load = () =>
+    api("/api/screens")
+      .then(draw)
+      .catch((err) => toast(err.message));
+  draw(null);
+  load();
+  body.onclick = async (e) => {
+    if (e.target.closest("[data-code]")) {
+      try {
+        pairing = await api("/api/screens/pair-code", { method: "POST", body: { name: body.querySelector("#screenName").value } });
+        haptic();
+        load();
+      } catch (err) {
+        toast(err.message);
+      }
+    }
+    const un = e.target.closest("[data-unpair]");
+    if (un) {
+      if (!(await confirmDialog(`«${un.dataset.name}» uzilsinmi? Ekran qayta kod so'raydi.`))) return;
+      try {
+        await api(`/api/screens/${un.dataset.unpair}`, { method: "DELETE" });
+        toast("Uzildi");
+        load();
+      } catch (err) {
+        toast(err.message);
+      }
+    }
   };
 }
 
@@ -1116,6 +1183,7 @@ function openDrawer() {
           ["admin", "⚙️  Mahsulotlarni boshqarish"],
           ["banners", "🖼  Bannerlar va aksiyalar"],
           ["staff", "👥  Xodimlar"],
+          ["screens", "🖥  Ombor ekrani"],
         ]
       : []),
   ];
@@ -1141,6 +1209,7 @@ $("#drawerNav").onclick = (e) => {
   if (k === "stock") openSheet(warehouseSheet);
   if (k === "banners") openSheet(bannersSheet);
   if (k === "staff") openSheet(staffSheet);
+  if (k === "screens") openSheet(screensSheet);
   if (k.startsWith("cat:")) document.querySelector(`[data-tab="${k.slice(4)}"]`)?.click();
 };
 

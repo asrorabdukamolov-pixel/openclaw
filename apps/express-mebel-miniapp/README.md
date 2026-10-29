@@ -107,6 +107,34 @@ Qanday ishlaydi:
 - 30 daqiqada to'lanmagan bronlarni `releaseUnpaid` funksiyasi har 10 daqiqada qaytaradi.
 - Telegram to'lovdan oldin summa, valyuta (UZS) va buyurtma holatini tekshiradi; muddati o'tgan buyurtmaga to'lov qabul qilinmaydi.
 
+## Ombor ekrani va shtrix-kod
+
+Ombordagi kompyuter, sensorli monitor yoki planshetda brauzerda ochiladi: `https://<ID>.web.app/ombor.html`.
+
+1. **Ulash:** Telegram ilovada admin: ☰ → **🖥 Ombor ekrani** → nom → **Kod olish** (10 daqiqa, bir martalik).
+   Ekranda kodni kiriting. Ekran shu brauzerda eslab qoladi; uzish: o'sha bo'limda **Uzish**.
+2. **Etiketka:** ekranda **🏷 Etiketkalar** → mahsulot → nechta dona → **Chop etish**. Har bir dona va har bir quti
+   uchun alohida etiketka (58 × 40 mm, CODE128): `EM<SKU>-<quti raqami>`, masalan `EM100013-2`.
+   Mahsulotning qutilar soni admin panelda **"Qutilar soni"** maydonida.
+3. **Buyurtma bosqichlari** (har birida mijozga bot xabari):
+
+| Bosqich | Kim o'tkazadi | Mijozga |
+| --- | --- | --- |
+| 🆕 Yangi | naqd buyurtma darhol, karta — to'langach ekranga tushadi | "Buyurtmangiz #N qabul qilindi" |
+| 📦 Yig'ilmoqda | ekranda **Yig'ishni boshlash** | "omborda yig'ilmoqda" |
+| ✅ Tayyor | barcha qutilar skanerlanganda o'zi | "yig'ildi, jo'natishga tayyor" |
+| 🚚 Yo'lda | ekranda **Yo'lga chiqarish** | "yo'lga chiqdi" + **✅ Qabul qildim** / **⚠️ Muammo bor** |
+| 🏁 Yakunlandi | mijoz **Qabul qildim** bosadi yoki 5 kundan keyin o'zi (`closeShipped`) | "Rahmat!" |
+| ⚠️ Muammo | mijoz **Muammo bor** bosadi | adminga xabar, operator bog'lanadi |
+
+Skaner (USB/Bluetooth) klaviatura kabi ishlaydi: kod + Enter. Noto'g'ri mahsulot, ortiqcha yoki takroriy quti
+qizil signal bilan rad etiladi. Shtrix-kod o'qilmasa, qutini ekranda bosib belgilash mumkin.
+Ekran har 5 soniyada yangilanadi, yangi buyurtma kelganda ovozli signal beradi (**🔈 Ovozni yoqish** bir marta bosiladi).
+Admin va omborchilar ham shu amallarni Telegram orqali bajarishi mumkin (API bir xil).
+
+Bu versiyani yuklagandan keyin `/api/setup` ni **qayta oching**: mavjud mahsulotlarga SKU beriladi va bot
+"Qabul qildim" tugmalarini qabul qiladigan bo'ladi.
+
 ## Omborchini qo'shish
 
 1. Admin: ☰ → **👥 Xodimlar** → **＋ Omborchini taklif qilish** → **📤 Yuborish** (yoki nusxalab, omborchiga jo'nating).
@@ -153,6 +181,11 @@ Hammasi `https://<ID>.web.app/api/...` ostida (Hosting → `api` funksiyasi, `eu
 | GET | `/api/staff` | admin |
 | POST | `/api/staff/invites` | admin (24 soatlik bir martalik havola) |
 | DELETE | `/api/staff/:telegramId` | admin |
+| POST | `/api/screens/pair-code` | admin (`{ name }` → 8 belgili kod) |
+| POST | `/api/screens/pair` | hamma (`{ code }` → ekran tokeni) |
+| GET / DELETE | `/api/screens`, `/api/screens/:id` | admin |
+| GET | `/api/fulfillment` | ekran tokeni, admin, omborchi |
+| POST | `/api/fulfillment/:id/start` · `/pick` · `/ship` | ekran tokeni, admin, omborchi (`pick`: `{ code }` yoki `{ item, box }`) |
 | GET | `/api/geocode?lat=&lon=` | hamma |
 | POST | `/api/orders/:id/cancel` | buyurtma egasi (to'lanmagan bronni qaytarish) |
 | POST | `/api/orders` | hamma (qoldiqdan ko'p bo'lsa 409); `payment: "card"` → `invoiceLink` |
