@@ -859,68 +859,100 @@ const DELIVERY_WINDOWS = [
 ];
 // Orders one window can take: one vehicle run. Raise it when more vehicles drive.
 const SLOT_CAPACITY = 4;
-const SLOT_DAYS_AHEAD = 10;
+// The buyer's own calendar reaches this far; the quick offer takes the earliest free windows.
+const SLOT_DAYS_AHEAD = 30;
 const SLOTS_OFFERED = 4;
 const SLOT_REMIND_MS = 3 * 60 * 60 * 1000;
 const SLOT_ESCALATE_MS = 24 * 60 * 60 * 1000;
 const MONTHS = ["yanvar", "fevral", "mart", "aprel", "may", "iyun", "iyul", "avgust", "sentabr", "oktabr", "noyabr", "dekabr"];
 const WEEKDAYS = ["yakshanba", "dushanba", "seshanba", "chorshanba", "payshanba", "juma", "shanba"];
+const WEEKDAYS_SHORT = ["Ya", "Du", "Se", "Ch", "Pa", "Ju", "Sh"];
 const SUNDAY = 0;
 
 const tashkentDay = (ms) => new Date(ms + TZ_OFFSET_MS).toISOString().slice(0, 10);
 const hh = (h) => `${String(h).padStart(2, "0")}:00`;
+const dayShort = (date) => `${date.getUTCDate()}-${MONTHS[date.getUTCMonth()].slice(0, 3)}`;
 
-// Valid keys only: a known window on a working day from tomorrow up to SLOT_DAYS_AHEAD.
+// Working days from tomorrow up to SLOT_DAYS_AHEAD, as "YYYY-MM-DD".
+function deliveryDays() {
+  const today = new Date(`${tashkentDay(Date.now())}T00:00:00Z`).getTime();
+  return Array.from({ length: SLOT_DAYS_AHEAD }, (_, i) => new Date(today + (i + 1) * 864e5))
+    .filter((d) => d.getUTCDay() !== SUNDAY)
+    .map((d) => d.toISOString().slice(0, 10));
+}
+
+// Valid keys only: a known window on a working day inside the horizon.
 function parseSlot(key) {
   const m = /^(\d{4}-\d{2}-\d{2})_(\d{1,2})$/.exec(String(key));
   const window = m && DELIVERY_WINDOWS.find((w) => w.from === Number(m[2]));
-  if (!window) return null;
+  if (!window || !deliveryDays().includes(m[1])) return null;
   const date = new Date(`${m[1]}T00:00:00Z`);
-  const days = (date - new Date(`${tashkentDay(Date.now())}T00:00:00Z`)) / 864e5;
-  if (!(days >= 1 && days <= SLOT_DAYS_AHEAD) || date.getUTCDay() === SUNDAY) return null;
-  const label = `${date.getUTCDate()}-${MONTHS[date.getUTCMonth()]}, ${WEEKDAYS[date.getUTCDay()]}, ${hh(window.from)}–${hh(window.to)}`;
-  return { key: m[0], label, short: `${date.getUTCDate()}-${MONTHS[date.getUTCMonth()].slice(0, 3)} ${hh(window.from)}–${hh(window.to)}` };
+  const time = `${hh(window.from)}–${hh(window.to)}`;
+  return {
+    key: m[0],
+    day: m[1],
+    label: `${date.getUTCDate()}-${MONTHS[date.getUTCMonth()]}, ${WEEKDAYS[date.getUTCDay()]}, ${time}`,
+    short: `${dayShort(date)} ${time}`,
+    time,
+  };
 }
 
-function upcomingSlots() {
-  const today = new Date(`${tashkentDay(Date.now())}T00:00:00Z`).getTime();
-  const keys = [];
-  for (let d = 1; d <= SLOT_DAYS_AHEAD; d++) {
-    const day = new Date(today + d * 864e5).toISOString().slice(0, 10);
-    for (const w of DELIVERY_WINDOWS) keys.push(`${day}_${w.from}`);
-  }
-  return keys.map(parseSlot).filter(Boolean);
-}
-
-// The first windows with room left, earliest first.
-async function openSlots() {
-  const slots = upcomingSlots();
-  const taken = await ordersCol.where("deliverySlot", "in", slots.map((s) => s.key)).get();
+// Free windows over the whole horizon. Keys sort by date, so one range query covers it.
+async function freeSlots() {
+  const days = deliveryDays();
+  const taken = await ordersCol.where("deliverySlot", ">=", days[0]).where("deliverySlot", "<", `${days.at(-1)}~`).get();
   const count = {};
   for (const d of taken.docs) count[d.data().deliverySlot] = (count[d.data().deliverySlot] || 0) + 1;
-  return slots.filter((s) => (count[s.key] || 0) < SLOT_CAPACITY).slice(0, SLOTS_OFFERED);
+  return days
+    .flatMap((day) => DELIVERY_WINDOWS.map((w) => parseSlot(`${day}_${w.from}`)))
+    .filter((s) => (count[s.key] || 0) < SLOT_CAPACITY);
 }
 
+const slotButton = (id, s, text) => ({ text, callback_data: `slot:${id}:${s.key}` });
+const pairs = (list) => Array.from({ length: Math.ceil(list.length / 2) }, (_, i) => list.slice(i * 2, i * 2 + 2));
+
+// First offer: the earliest free windows, plus the buyer's own calendar.
 async function slotKeyboard(id) {
-  const slots = await openSlots();
-  const rows = [];
-  for (let i = 0; i < slots.length; i += 2) {
-    rows.push(slots.slice(i, i + 2).map((s) => ({ text: s.short, callback_data: `slot:${id}:${s.key}` })));
-  }
-  rows.push([{ text: "📞 Boshqa kun kerak", callback_data: `slot:${id}:other` }]);
+  const quick = (await freeSlots()).slice(0, SLOTS_OFFERED);
+  return {
+    inline_keyboard: [
+      ...pairs(quick.map((s) => slotButton(id, s, s.short))),
+      [{ text: "🗓 Boshqa kunni tanlash", callback_data: `slot:${id}:cal` }],
+    ],
+  };
+}
+
+// The buyer's calendar: every working day with a free window, four to a row.
+async function calendarKeyboard(id) {
+  const free = await freeSlots();
+  const days = [...new Set(free.map((s) => s.day))];
+  const buttons = days.map((day) => {
+    const date = new Date(`${day}T00:00:00Z`);
+    return { text: `${dayShort(date)} ${WEEKDAYS_SHORT[date.getUTCDay()]}`, callback_data: `slot:${id}:d${day}` };
+  });
+  const rows = Array.from({ length: Math.ceil(buttons.length / 4) }, (_, i) => buttons.slice(i * 4, i * 4 + 4));
+  rows.push([{ text: "📞 Operator bilan kelishish", callback_data: `slot:${id}:op` }]);
   return { inline_keyboard: rows };
 }
 
+async function dayKeyboard(id, day) {
+  const free = (await freeSlots()).filter((s) => s.day === day);
+  return {
+    inline_keyboard: [
+      ...pairs(free.map((s) => slotButton(id, s, s.time))),
+      [{ text: "◀️ Boshqa kun", callback_data: `slot:${id}:cal` }],
+    ],
+  };
+}
+
 // Books a window inside a transaction so a full window cannot be overbooked by two buyers at once.
-async function bookSlot(id, key, buyerId) {
+async function bookSlot(id, key) {
   const slot = parseSlot(key);
   if (!slot) return { error: "Bu vaqt endi mavjud emas, yangisini tanlang", retry: true };
   const ref = ordersCol.doc(id);
   return db.runTransaction(async (t) => {
-    const snap = await t.get(ref);
-    const o = snap.data();
-    if (!snap.exists || o.telegramUserId !== buyerId) return { error: "Buyurtma topilmadi" };
-    if (o.stage !== "ready" || o.orderType !== "delivery") return { error: "Bu buyurtma uchun vaqt tanlab bo'lmaydi", closed: true };
+    const o = (await t.get(ref)).data();
+    if (o.stage !== "ready") return { error: "Bu buyurtma uchun vaqt tanlab bo'lmaydi" };
     const taken = await t.get(ordersCol.where("deliverySlot", "==", slot.key));
     const others = taken.docs.filter((d) => d.id !== id).length;
     if (others >= SLOT_CAPACITY) return { error: "Bu vaqt band bo'lib qoldi, boshqasini tanlang", retry: true };
@@ -929,24 +961,38 @@ async function bookSlot(id, key, buyerId) {
   });
 }
 
-async function handleSlotCallback(q, id, key) {
+// Slot buttons edit their own message while the buyer browses (calendar, day, back), so the chat
+// keeps one picker; booking or handing over to the operator closes it.
+async function handleSlotCallback(q, id, arg) {
+  const snap = await ordersCol.doc(id).get();
+  const o = snap.data();
+  if (!snap.exists || o.telegramUserId !== q.from.id) return { answer: "Buyurtma topilmadi", close: true };
+  if (o.stage !== "ready" || o.orderType !== "delivery") return { answer: "Bu buyurtma uchun vaqt tanlab bo'lmaydi", close: true };
   const chat = q.message?.chat.id ?? q.from.id;
-  if (key === "other") {
-    const snap = await ordersCol.doc(id).get();
-    const o = snap.data();
-    if (!snap.exists || o.telegramUserId !== q.from.id || o.stage !== "ready") return { answer: "Buyurtma topilmadi", close: true };
+  const show = async (text, reply_markup) => {
+    if (q.message) await tg("editMessageText", { chat_id: chat, message_id: q.message.message_id, text, reply_markup });
+    else await tg("sendMessage", { chat_id: chat, text, reply_markup });
+    return { answer: "" };
+  };
+  if (arg === "cal") return show("🗓 Qulay kunni tanlang:", await calendarKeyboard(id));
+  const day = /^d(\d{4}-\d{2}-\d{2})$/.exec(arg)?.[1];
+  if (day) {
+    const date = new Date(`${day}T00:00:00Z`);
+    return show(`🗓 ${date.getUTCDate()}-${MONTHS[date.getUTCMonth()]}, ${WEEKDAYS[date.getUTCDay()]}. Soatni tanlang:`, await dayKeyboard(id, day));
+  }
+  if (arg === "op") {
     await ordersCol.doc(id).update({ slotOther: true, slotOtherAt: Date.now() });
-    await tg("sendMessage", { chat_id: ordersChat(), text: `📞 ${ORDER_LABEL(o)}: mijoz boshqa kunni xohlaydi. ${o.name}, ${o.phone}\nQo'ng'iroq qilib, kunni kelishing.` });
+    await tg("sendMessage", { chat_id: ordersChat(), text: `📞 ${ORDER_LABEL(o)}: mijoz yetkazish kunini operator bilan kelishmoqchi. ${o.name}, ${o.phone}` });
     await tg("sendMessage", { chat_id: chat, text: "Operatorimiz siz bilan bog'lanib, qulay kunni kelishadi." });
     return { answer: "Operator bog'lanadi", close: true };
   }
-  const r = await bookSlot(id, key, q.from.id);
-  // A stale or full window: offer the current free ones instead.
+  const r = await bookSlot(id, arg);
+  if (r.error && !r.retry) return { answer: r.error, close: true };
+  // A stale or full window: show the current free ones in place.
   if (r.retry) {
-    await tg("sendMessage", { chat_id: chat, text: `${r.error}:`, reply_markup: await slotKeyboard(id) });
-    return { answer: r.error, close: true };
+    await show(`${r.error}:`, await slotKeyboard(id));
+    return { answer: r.error };
   }
-  if (r.error) return { answer: r.error, close: Boolean(r.closed) };
   await tg("sendMessage", {
     chat_id: chat,
     text: `🗓 Yetkazish vaqti: ${r.slot.label}.\nKuryer yo'lga chiqqanda xabar beramiz.`,
@@ -1054,7 +1100,7 @@ async function handleCallback(q) {
     if (action === "slot") {
       const r = await handleSlotCallback(q, id || "-", slotKey);
       answer = r.answer;
-      closeButtons = r.close;
+      closeButtons = Boolean(r.close);
       return;
     }
     const snap = await ordersCol.doc(id || "-").get();
