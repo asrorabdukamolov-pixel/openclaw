@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="uz">
+  <head>
+    <meta charset="utf-8" />
+    <title>Etiketka — Express Mebel</title>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500;700&display=swap" rel="stylesheet" />
+    <style>
+      /* One label per box; the page size comes from the chosen roll (label.js sets --w/--h and @page). */
+      body {
+        margin: 0;
+        font-family: "Montserrat", Arial, sans-serif;
+        color: #2b2a29;
+        background: #e9ebe9;
+      }
+      .label {
+        width: var(--w);
+        height: var(--h);
+        box-sizing: border-box;
+        padding: 2mm 3mm;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        background: #fff;
+        overflow: hidden;
+        page-break-after: always;
+        break-after: page;
+      }
+      .top {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        font-size: 7pt;
+        font-weight: 700;
+      }
+      .name {
+        font-size: 8pt;
+        font-weight: 700;
+        line-height: 1.15;
+        max-height: 2.3em;
+        overflow: hidden;
+      }
+      .box {
+        font-size: 11pt;
+        font-weight: 700;
+      }
+      svg {
+        width: 100%;
+        height: 10mm;
+      }
+      .code {
+        font-size: 8pt;
+        font-weight: 700;
+        text-align: center;
+        letter-spacing: 0.5px;
+      }
+      /* 58 × 30: same parts, tighter. */
+      .size-m .label {
+        padding: 1.5mm 3mm;
+      }
+      .size-m .name {
+        max-height: 1.15em;
+      }
+      .size-m .box {
+        font-size: 9pt;
+      }
+      .size-m svg {
+        height: 8mm;
+      }
+      /* Narrow edges (≥ 18 mm board ends): one text line over a full-width barcode. */
+      .size-s .label {
+        padding: 1mm 2.5mm; /* side quiet zone for the scanner */
+        justify-content: flex-start;
+        gap: 0.5mm;
+      }
+      .size-s .top,
+      .size-s .box {
+        display: none;
+      }
+      .size-s .name {
+        display: flex;
+        gap: 2mm;
+        font-size: 5.5pt;
+        line-height: 1.2;
+        white-space: nowrap;
+      }
+      .size-s .name span:first-child {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .size-s svg {
+        height: 8.5mm;
+      }
+      .size-s .code {
+        font-size: 6pt;
+      }
+      .small-box {
+        display: none;
+      }
+      .size-s .small-box {
+        display: inline;
+        font-weight: 700;
+      }
+      .bar select {
+        padding: 9px 10px;
+        border-radius: 10px;
+        border: 0;
+        font: 600 15px "Montserrat", Arial, sans-serif;
+      }
+      .bar {
+        position: sticky;
+        top: 0;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        padding: 12px 16px;
+        background: #2b2a29;
+        color: #fff;
+        font-size: 15px;
+      }
+      .bar button {
+        padding: 10px 18px;
+        border: 0;
+        border-radius: 10px;
+        background: #008e9b;
+        color: #fff;
+        font: 700 15px "Montserrat", Arial, sans-serif;
+        cursor: pointer;
+      }
+      .sheet {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6mm;
+        padding: 6mm;
+      }
+      @media print {
+        .bar {
+          display: none;
+        }
+        body {
+          background: #fff;
+        }
+        .sheet {
+          display: block;
+          padding: 0;
+        }
+      }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
+  </head>
+  <body>
+    <div class="bar">
+      <span id="info">Yuklanmoqda…</span>
+      <select id="size" aria-label="Etiketka o'lchami">
+        <option value="s">40 × 15 mm</option>
+        <option value="m">58 × 30 mm</option>
+        <option value="l">58 × 40 mm</option>
+      </select>
+      <button onclick="window.print()">🖨 Chop etish</button>
+    </div>
+    <div class="sheet" id="sheet"></div>
+    <script src="/label.js" type="module"></script>
+  </body>
+</html>
