@@ -559,6 +559,8 @@ function checkoutSheet(body) {
       state.cart = {};
       save("em_cart", state.cart);
       checkout = null;
+      // The order changed stock (kits too): show what is left now, not the pre-order numbers.
+      await reload().catch(() => {});
       renderCatalog();
       sheetStack = [successSheet(order)];
       drawSheet();
@@ -671,12 +673,10 @@ function productForm(id, newKind = "item") {
         <div class="field">Komplekt tarkibi (modullar)</div>
         <div id="kitParts"></div>
         <div class="row2">
-          <label class="field">Modul<select id="partPick"><option value="">Tanlang…</option>${stocked()
-            .map((m) => `<option value="${m.id}">${esc(m.name)}${m.sku ? ` · SKU ${m.sku}` : ""}</option>`)
-            .join("")}</select></label>
+          <label class="field">Modulni qidiring<input id="partSearch" type="search" placeholder="Nomi yoki SKU" autocomplete="off" /></label>
           <label class="field">Soni<input id="partQty" type="number" inputmode="numeric" min="1" max="50" value="1" /></label>
         </div>
-        <button class="btn btn--ghost" type="button" data-part-add style="margin-bottom:12px">＋ Modulni qo'shish</button>
+        <div id="partResults" style="margin-bottom:12px"></div>
         <div class="row2">
           <label class="field">Modul yetishmasa
             <select name="whenShort">
@@ -744,6 +744,36 @@ function productForm(id, newKind = "item") {
     };
     drawParts();
 
+    // A search list instead of a native <select>: catalogs grow to hundreds of modules, and the
+    // select's popup closed the sheet in some Telegram clients.
+    const partSearch = body.querySelector("#partSearch");
+    const partResults = body.querySelector("#partResults");
+    const addPart = (pickId) => {
+      const qty = Math.max(1, Math.min(50, Number(body.querySelector("#partQty").value) || 1));
+      const same = parts.find((c) => c.id === pickId);
+      if (same) same.qty += qty;
+      else parts.push({ id: pickId, qty });
+      partSearch.value = "";
+      drawResults();
+      drawParts();
+    };
+    const drawResults = () => {
+      const q = partSearch.value.trim().toLowerCase();
+      const found = q ? stocked().filter((m) => `${m.name} ${m.sku ?? ""}`.toLowerCase().includes(q)).slice(0, 6) : [];
+      partResults.innerHTML = found
+        .map((m) => `<button type="button" class="admin-item" data-part-pick="${m.id}"><div><div class="line-name">${esc(m.name)}</div><small>SKU ${m.sku ?? "—"} · ${m.boxes ?? 1} quti · omborda ${m.stock}</small></div><span class="chip">＋ Qo'shish</span></button>`)
+        .join("");
+    };
+    if (partSearch) {
+      partSearch.oninput = drawResults;
+      partSearch.onkeydown = (e) => {
+        if (e.key !== "Enter") return;
+        e.preventDefault();
+        const first = partResults.querySelector("[data-part-pick]");
+        if (first) addPart(first.dataset.partPick);
+      };
+    }
+
     fileInput.onchange = async () => {
       for (const file of fileInput.files) {
         try {
@@ -760,15 +790,8 @@ function productForm(id, newKind = "item") {
 
     body.onclick = async (e) => {
       if (e.target.closest("[data-pick]")) fileInput.click();
-      if (e.target.closest("[data-part-add]")) {
-        const pickId = body.querySelector("#partPick").value;
-        const qty = Math.max(1, Math.min(50, Number(body.querySelector("#partQty").value) || 1));
-        if (!pickId) return toast("Modulni tanlang");
-        const same = parts.find((c) => c.id === pickId);
-        if (same) same.qty += qty;
-        else parts.push({ id: pickId, qty });
-        drawParts();
-      }
+      const partPick = e.target.closest("[data-part-pick]");
+      if (partPick) addPart(partPick.dataset.partPick);
       const partRm = e.target.closest("[data-part-rm]");
       if (partRm) {
         parts.splice(Number(partRm.dataset.partRm), 1);
