@@ -5,11 +5,7 @@
     <title>Etiketka — Express Mebel</title>
     <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500;700&display=swap" rel="stylesheet" />
     <style>
-      /* One label per box, sized for a 58 × 40 mm thermal label printer. */
-      @page {
-        size: 58mm 40mm;
-        margin: 0;
-      }
+      /* One label per box; the page size comes from the chosen roll (label.js sets --w/--h and @page). */
       body {
         margin: 0;
         font-family: "Montserrat", Arial, sans-serif;
@@ -17,8 +13,8 @@
         background: #e9ebe9;
       }
       .label {
-        width: 58mm;
-        height: 40mm;
+        width: var(--w);
+        height: var(--h);
         box-sizing: border-box;
         padding: 2mm 3mm;
         display: flex;
@@ -49,7 +45,67 @@
       }
       svg {
         width: 100%;
-        height: 13mm;
+        height: 10mm;
+      }
+      .code {
+        font-size: 8pt;
+        font-weight: 700;
+        text-align: center;
+        letter-spacing: 0.5px;
+      }
+      /* 58 × 30: same parts, tighter. */
+      .size-m .label {
+        padding: 1.5mm 3mm;
+      }
+      .size-m .name {
+        max-height: 1.15em;
+      }
+      .size-m .box {
+        font-size: 9pt;
+      }
+      .size-m svg {
+        height: 8mm;
+      }
+      /* Narrow edges (≥ 18 mm board ends): one text line over a full-width barcode. */
+      .size-s .label {
+        padding: 1mm 2.5mm; /* side quiet zone for the scanner */
+        justify-content: flex-start;
+        gap: 0.5mm;
+      }
+      .size-s .top,
+      .size-s .box {
+        display: none;
+      }
+      .size-s .name {
+        display: flex;
+        gap: 2mm;
+        font-size: 5.5pt;
+        line-height: 1.2;
+        white-space: nowrap;
+      }
+      .size-s .name span:first-child {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .size-s svg {
+        height: 8.5mm;
+      }
+      .size-s .code {
+        font-size: 6pt;
+      }
+      .small-box {
+        display: none;
+      }
+      .size-s .small-box {
+        display: inline;
+        font-weight: 700;
+      }
+      .bar select {
+        padding: 9px 10px;
+        border-radius: 10px;
+        border: 0;
+        font: 600 15px "Montserrat", Arial, sans-serif;
       }
       .bar {
         position: sticky;
@@ -93,7 +149,15 @@
     <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
   </head>
   <body>
-    <div class="bar"><span id="info">Yuklanmoqda…</span><button onclick="window.print()">🖨 Chop etish</button></div>
+    <div class="bar">
+      <span id="info">Yuklanmoqda…</span>
+      <select id="size" aria-label="Etiketka o'lchami">
+        <option value="l">58 × 40 mm</option>
+        <option value="m">58 × 30 mm</option>
+        <option value="s">40 × 15 mm (yon tomonga)</option>
+      </select>
+      <button onclick="window.print()">🖨 Chop etish</button>
+    </div>
     <div class="sheet" id="sheet"></div>
     <script src="/label.js" type="module"></script>
   </body>

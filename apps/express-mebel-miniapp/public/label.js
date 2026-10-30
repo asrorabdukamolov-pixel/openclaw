@@ -4,6 +4,34 @@ const params = new URLSearchParams(location.search);
 const count = Math.max(1, Math.min(200, Number(params.get("count")) || 1));
 const info = document.querySelector("#info");
 
+// Roll sizes in mm; "s" fits board edges from 18 mm. The choice is remembered per screen.
+const SIZES = { l: [58, 40], m: [58, 30], s: [40, 15] };
+const sizeSelect = document.querySelector("#size");
+const pageStyle = document.createElement("style");
+document.head.append(pageStyle);
+const applySize = (key) => {
+  const [w, h] = SIZES[key];
+  document.body.className = `size-${key}`;
+  document.body.style.setProperty("--w", `${w}mm`);
+  document.body.style.setProperty("--h", `${h}mm`);
+  pageStyle.textContent = `@page { size: ${w}mm ${h}mm; margin: 0; }`;
+};
+const savedSize = (() => {
+  try {
+    return localStorage.getItem("em_label_size");
+  } catch {
+    return null;
+  }
+})();
+sizeSelect.value = SIZES[params.get("size")] ? params.get("size") : SIZES[savedSize] ? savedSize : "l";
+applySize(sizeSelect.value);
+sizeSelect.onchange = () => {
+  applySize(sizeSelect.value);
+  try {
+    localStorage.setItem("em_label_size", sizeSelect.value);
+  } catch {}
+};
+
 const esc = (s) => String(s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
 
 try {
@@ -28,11 +56,12 @@ try {
       label.className = "label";
       label.innerHTML = `
         <div class="top"><span>EXPRESS MEBEL</span><span>SKU ${p.sku}</span></div>
-        <div class="name">${esc(p.name)}</div>
+        <div class="name"><span>${esc(p.name)}</span><span class="small-box">${box}/${boxes}</span></div>
         <div class="box">Quti ${box}/${boxes}</div>
-        <svg></svg>`;
+        <svg preserveAspectRatio="none"></svg>
+        <div class="code">${code}</div>`;
       sheet.append(label);
-      JsBarcode(label.querySelector("svg"), code, { format: "CODE128", height: 40, fontSize: 14, margin: 0, displayValue: true });
+      JsBarcode(label.querySelector("svg"), code, { format: "CODE128", height: 40, margin: 0, displayValue: false });
     }
   }
   info.textContent = `${p.name}: ${count} dona × ${boxes} quti = ${count * boxes} ta etiketka`;
