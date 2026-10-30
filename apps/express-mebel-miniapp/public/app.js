@@ -1143,8 +1143,19 @@ const ORDER_FILTERS = [
   ["all", "Hammasi"],
 ];
 const orderNo = (o) => (o.number ? `#${o.number}` : `#${o.id.slice(-5).toUpperCase()}`);
-const orderState = (o) => (o.stage === null ? (o.status === "paid_after_cancel" ? "To'lov kech keldi" : "To'lov kutilmoqda") : STAGE_LABEL[o.stage] || o.stage);
-const orderGroup = (o) => (o.stage === "delivered" ? "done" : o.stage === "cancelled" ? "cancelled" : "active");
+// Unpaid card checkouts are cancelled by status only (their stage stays null), so status decides
+// first; a payment that landed after such a cancel needs an admin and stays active.
+function orderState(o) {
+  if (o.status === "paid_after_cancel") return "To'lov kech keldi";
+  if (o.status === "cancelled") return STAGE_LABEL.cancelled;
+  return o.stage === null ? "To'lov kutilmoqda" : STAGE_LABEL[o.stage] || o.stage;
+}
+
+function orderGroup(o) {
+  if (o.status === "paid_after_cancel") return "active";
+  if (o.status === "cancelled") return "cancelled";
+  return o.stage === "delivered" ? "done" : "active";
+}
 
 function orderRowHtml(o) {
   const flags = [
@@ -1155,7 +1166,7 @@ function orderRowHtml(o) {
     <div><div class="line-name">${orderNo(o)} · ${sum(o.total)} so'm</div>
       <small>${when(o.createdAt)} · ${esc(o.lines.map((l) => `${l.name} × ${l.qty}`).join(", "))}</small>
       ${flags ? `<div class="chips">${flags}</div>` : ""}</div>
-    <span class="chip ${o.stage === "cancelled" ? "chip--off" : ""}">${orderState(o)}</span>
+    <span class="chip ${orderGroup(o) === "cancelled" ? "chip--off" : ""}">${orderState(o)}</span>
   </button>`;
 }
 
