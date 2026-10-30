@@ -37,6 +37,7 @@ const invitesCol = db.collection("staffInvites");
 const screensCol = db.collection("screens");
 const pairingsCol = db.collection("screenPairings");
 const countersRef = db.collection("meta").doc("counters");
+const deliveryRef = db.collection("meta").doc("delivery");
 
 const PROJECT_ID = process.env.GCLOUD_PROJECT;
 const WEBAPP_URL = `https://${PROJECT_ID}.web.app`;
@@ -223,6 +224,57 @@ function parseLocation(value) {
     throw new HttpError(400, "Joylashuv noto'g'ri");
   }
   return { lat: Math.round(lat * 1e6) / 1e6, lon: Math.round(lon * 1e6) / 1e6 };
+}
+
+// ---------- delivery price ----------
+// Price = distance from the warehouse × per-km rate + unloading (every delivery needs a loader)
+// + carrying up the stairs above the first free floors when there is no lift. Admins edit the
+// rates in the mini app; these defaults apply until they do.
+const DELIVERY_DEFAULTS = { perKm: 1500, unloading: 100000, perFloor: 20000, freeFloors: 2, warehouse: null };
+// Straight-line distance understates city roads; this factor approximates the driven route.
+const ROAD_FACTOR = 1.3;
+
+async function deliverySettings() {
+  return { ...DELIVERY_DEFAULTS, ...(await deliveryRef.get()).data() };
+}
+
+function cleanDeliverySettings(input) {
+  const money = (v, name) => {
+    const n = Math.round(Number(v));
+    if (!(n >= 0 && n <= 10_000_000)) throw new HttpError(400, `${name} noto'g'ri`);
+    return n;
+  };
+  const floors = Math.round(Number(input.freeFloors));
+  if (!(floors >= 0 && floors <= 30)) throw new HttpError(400, "Bepul qavatlar soni noto'g'ri");
+  return {
+    perKm: money(input.perKm, "1 km narxi"),
+    unloading: money(input.unloading, "Tushirib berish narxi"),
+    perFloor: money(input.perFloor, "Qavat narxi"),
+    freeFloors: floors,
+    warehouse: input.warehouse ? parseLocation(input.warehouse) : null,
+    updatedAt: Date.now(),
+  };
+}
+
+function distanceKm(a, b) {
+  const rad = (d) => (d * Math.PI) / 180;
+  const h = Math.sin(rad(b.lat - a.lat) / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(rad(b.lon - a.lon) / 2) ** 2;
+  return 2 * 6371 * Math.asin(Math.sqrt(h)) * ROAD_FACTOR;
+}
+
+const roundSum = (n) => Math.round(n / 1000) * 1000;
+
+function quoteDelivery(settings, input) {
+  const location = parseLocation(input.location);
+  if (!location) throw new HttpError(400, "Yetkazish narxini hisoblash uchun joylashuvni yuboring (📍 tugmasi)");
+  const floor = Math.round(Number(input.floor));
+  if (!(floor >= 1 && floor <= 40)) throw new HttpError(400, "Qavatni kiriting");
+  const lift = Boolean(input.lift);
+  // Without a warehouse pin the distance part is unknown; the rest still applies and admins are told.
+  const km = settings.warehouse ? Math.round(distanceKm(settings.warehouse, location) * 10) / 10 : null;
+  const distance = km === null ? 0 : roundSum(km * settings.perKm);
+  const stairs = lift ? 0 : Math.max(0, floor - settings.freeFloors) * settings.perFloor;
+  return { km, distance, unloading: settings.unloading, floor, lift, stairs, total: distance + settings.unloading + stairs };
 }
 
 // ---------- stock ----------
@@ -544,7 +596,9 @@ async function handleOrder(req, res) {
   const body = req.body || {};
   const phone = String(body.phone || "").trim();
   if (!/^\+?[\d\s()-]{7,20}$/.test(phone)) throw new HttpError(400, "Telefon raqam noto'g'ri");
-  const location = body.orderType === "pickup" ? null : parseLocation(body.location);
+  const pickup = body.orderType === "pickup";
+  const location = pickup ? null : parseLocation(body.location);
+  const delivery = pickup ? null : quoteDelivery(await deliverySettings(), body);
   const payment = body.payment === "card" ? "card" : "cash";
   if (payment === "card" && !cardsEnabled()) throw new HttpError(400, "Karta orqali to'lov hali yoqilmagan");
   // The invoice opens inside Telegram and the receipt goes to the buyer's chat.
@@ -589,9 +643,11 @@ async function handleOrder(req, res) {
       })),
       // ... and what the warehouse picks: physical modules with their boxes, kits expanded and merged.
       pick: pick.map((m) => ({ id: m.ref.id, name: m.product.name, qty: m.qty, sku: m.product.sku ?? null, boxes: m.product.boxes ?? 1 })),
-      total: lines.reduce((n, l) => n + l.product.price * l.qty, 0),
+      goodsTotal: lines.reduce((n, l) => n + l.product.price * l.qty, 0),
+      delivery,
+      total: lines.reduce((n, l) => n + l.product.price * l.qty, 0) + (delivery?.total ?? 0),
       lowStock: pick.filter((m) => m.product.stock <= 3).map((m) => ({ name: m.product.name, stock: m.product.stock })),
-      orderType: body.orderType === "pickup" ? "pickup" : "delivery",
+      orderType: pickup ? "pickup" : "delivery",
       payment,
       status: payment === "card" ? "awaiting_payment" : "new",
       // Fulfillment stage: a card order reaches the warehouse screen only once it is paid.
@@ -622,7 +678,10 @@ async function handleOrder(req, res) {
       payload: orderRef.id,
       provider_token: PAYMENT_PROVIDER_TOKEN.value(),
       currency: "UZS",
-      prices: order.items.map((i) => ({ label: `${i.name} × ${i.qty}`.slice(0, 64), amount: i.price * i.qty * UZS_MINOR })),
+      prices: [
+        ...order.items.map((i) => ({ label: `${i.name} × ${i.qty}`.slice(0, 64), amount: i.price * i.qty * UZS_MINOR })),
+        ...(order.delivery ? [{ label: "Yetkazib berish", amount: order.delivery.total * UZS_MINOR }] : []),
+      ],
     });
     return res.status(201).json({ ok: true, orderId: orderRef.id, total: order.total, invoiceLink });
   } catch (err) {
@@ -682,8 +741,20 @@ async function releaseOrder(orderId, fromStatuses, reason) {
   });
 }
 
+function deliveryLines(d) {
+  if (!d) return [];
+  return [
+    `• Yetkazish${d.km === null ? "" : ` (${d.km} km)`} = ${formatSum(d.distance)}`,
+    `• Tushirib berish = ${formatSum(d.unloading)}`,
+    d.stairs ? `• ${d.floor}-qavat, liftsiz = ${formatSum(d.stairs)}` : "",
+  ].filter(Boolean);
+}
+
 async function notifyOrder(id, order) {
-  const lines = order.items.map((i) => `• ${escapeHtml(i.name)} × ${i.qty} = ${formatSum(i.price * i.qty)}`);
+  const lines = [
+    ...order.items.map((i) => `• ${escapeHtml(i.name)} × ${i.qty} = ${formatSum(i.price * i.qty)}`),
+    ...deliveryLines(order.delivery),
+  ];
   const who = order.telegramUserId
     ? `${escapeHtml(order.name)}${order.telegramUsername ? ` (@${escapeHtml(order.telegramUsername)})` : ""}`
     : "—";
@@ -695,7 +766,8 @@ async function notifyOrder(id, order) {
     "",
     `<b>Jami:</b> ${formatSum(order.total)}`,
     `<b>To'lov:</b> ${order.payment === "card" ? "💳 Karta orqali — TO'LANGAN" : "💵 Qabul qilganda"}`,
-    `<b>Turi:</b> ${order.orderType === "pickup" ? "Olib ketish" : "Yetkazib berish"}`,
+    `<b>Turi:</b> ${order.orderType === "pickup" ? "Olib ketish" : `Yetkazib berish${order.delivery ? `, ${order.delivery.floor}-qavat, ${order.delivery.lift ? "lift bor" : "liftsiz"}` : ""}`}`,
+    order.delivery && order.delivery.km === null ? "⚠️ Ombor lokatsiyasi kiritilmagan: masofa narxi hisoblanmadi (☰ → 🚚 Yetkazish narxlari)." : "",
     `<b>Ism:</b> ${escapeHtml(order.name)}`,
     `<b>Telefon:</b> ${escapeHtml(order.phone)}`,
     order.address ? `<b>Manzil:</b> ${escapeHtml(order.address)}` : "",
@@ -889,6 +961,8 @@ function orderDetail(id, o) {
     address: o.address,
     comment: o.comment,
     location: o.location ?? null,
+    goodsTotal: o.goodsTotal ?? o.total,
+    delivery: o.delivery ?? null,
     picked: pickLines(o).map((i) => ({ name: i.name, qty: i.qty, sku: i.sku ?? null, boxes: i.boxes ?? 1 })),
     timeline: steps.filter(([key]) => o[key]).map(([key, text]) => ({ at: o[key], text })).sort((a, b) => a.at - b.at),
   };
@@ -1641,6 +1715,20 @@ async function route(req, res) {
   }
 
   if (path === "/api/orders" && method === "POST") return handleOrder(req, res);
+
+  if (path === "/api/delivery/quote" && method === "POST") {
+    return res.json(quoteDelivery(await deliverySettings(), req.body || {}));
+  }
+
+  if (path === "/api/delivery/settings") {
+    await requireRole(req, "admin");
+    if (method === "GET") return res.json(await deliverySettings());
+    if (method === "PUT") {
+      const next = cleanDeliverySettings(req.body || {});
+      await deliveryRef.set(next);
+      return res.json(next);
+    }
+  }
 
   if (path === "/api/orders" && method === "GET") {
     await requireRole(req, "admin");

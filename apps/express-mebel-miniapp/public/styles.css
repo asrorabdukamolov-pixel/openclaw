@@ -1241,3 +1241,21 @@ select {
 .timeline small {
   color: var(--muted);
 }
+
+/* ---------- delivery quote ---------- */
+.quote {
+  display: grid;
+  gap: 6px;
+  margin: 6px 0 14px;
+  font-size: 14px;
+}
+
+.quote > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.quote .total {
+  margin-top: 4px;
+}

@@ -388,6 +388,8 @@ function checkoutDraft() {
     address: saved.address || "",
     comment: "",
     location: saved.location || null,
+    floor: saved.floor || "",
+    lift: Boolean(saved.lift),
     payment: canPayByCard() ? "card" : "cash",
   };
   return checkout;
@@ -438,6 +440,42 @@ function requestLocation() {
 
 const mapLink = (loc) => `https://maps.google.com/?q=${loc.lat},${loc.lon}`;
 
+// Delivery price comes from the server (the same formula it charges); the sheet asks again
+// whenever the pin, floor or lift changes.
+let quote = null; // { key, data } | { key, error }
+const quoteKey = (d) => JSON.stringify([d.location, d.floor, d.lift]);
+
+function quoteHtml(goods, q) {
+  const rows = [`<div><span>Mahsulotlar</span><span>${sum(goods)} so'm</span></div>`];
+  if (!q || q.error) {
+    return `${rows.join("")}<p class="hint">${esc(q?.error || "Yetkazish narxi joylashuv va qavat kiritilgach hisoblanadi")}</p>`;
+  }
+  const dq = q.data;
+  rows.push(
+    `<div><span>Yetkazish${dq.km === null ? "" : ` · ${dq.km} km`}</span><span>${sum(dq.distance)} so'm</span></div>`,
+    `<div><span>Tushirib berish</span><span>${sum(dq.unloading)} so'm</span></div>`,
+  );
+  if (dq.stairs) rows.push(`<div><span>${dq.floor}-qavat, liftsiz</span><span>${sum(dq.stairs)} so'm</span></div>`);
+  rows.push(`<div class="total"><span>Jami</span><span>${sum(goods + dq.total)} so'm</span></div>`);
+  return rows.join("");
+}
+
+async function refreshQuote(d, goods) {
+  const key = quoteKey(d);
+  if (quote?.key === key) return;
+  if (!d.location || !d.floor) {
+    quote = null;
+  } else {
+    try {
+      quote = { key, data: await api("/api/delivery/quote", { method: "POST", body: { location: d.location, floor: Number(d.floor), lift: d.lift } }) };
+    } catch (err) {
+      quote = { key, error: err.message };
+    }
+  }
+  const box = document.querySelector("#quoteBox");
+  if (box) box.innerHTML = quoteHtml(goods, quote);
+}
+
 function checkoutSheet(body) {
   const d = checkoutDraft();
   const type = state.orderType || "delivery";
@@ -466,11 +504,15 @@ function checkoutSheet(body) {
                   : ""
               }
               <textarea id="addressInput" name="address" rows="2" required placeholder="Shahar, ko'cha, uy">${esc(d.address)}</textarea>
-              <small class="hint">Xonadon, podyezd va qavatni ham yozing</small>
+              <small class="hint">Xonadon va podyezdni ham yozing</small>
+            </div>
+            <div class="row2">
+              <label class="field">Qavat<input name="floor" type="number" inputmode="numeric" min="1" max="40" required value="${esc(d.floor)}" placeholder="3" /></label>
+              <label class="check" style="align-self:end;margin-bottom:18px"><input type="checkbox" name="lift" ${d.lift ? "checked" : ""} /> Lift bor</label>
             </div>`
           : ""
       }
-      <label class="field">Izoh<textarea name="comment" rows="2" placeholder="Lift bor/yo'q, qulay vaqt...">${esc(d.comment)}</textarea></label>
+      <label class="field">Izoh<textarea name="comment" rows="2" placeholder="Domofon kodi, mo'ljal...">${esc(d.comment)}</textarea></label>
       ${
         canPayByCard()
           ? `<div class="field">To'lov usuli</div>
@@ -480,13 +522,20 @@ function checkoutSheet(body) {
             </div>`
           : ""
       }
-      <div class="total"><span>Jami</span><span>${sum(total)} so'm</span></div>
+      ${
+        type === "delivery"
+          ? `<div id="quoteBox" class="quote">${quoteHtml(total, quote)}</div>`
+          : `<div class="total"><span>Jami</span><span>${sum(total)} so'm</span></div>`
+      }
       <button class="btn" type="submit">${d.payment === "card" && canPayByCard() ? "To'lovga o'tish" : "Tasdiqlash"}</button>
     </form>`;
   const form = body.querySelector("form");
   form.oninput = (e) => {
-    if (e.target.name) d[e.target.name] = e.target.value;
+    if (!e.target.name) return;
+    d[e.target.name] = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+    if (type === "delivery" && (e.target.name === "floor" || e.target.name === "lift")) refreshQuote(d, total);
   };
+  if (type === "delivery") refreshQuote(d, total);
   body.onclick = async (e) => {
     const seg = e.target.closest("[data-type]");
     if (seg) {
@@ -535,13 +584,13 @@ function checkoutSheet(body) {
     const btn = e.target.querySelector("button[type=submit]");
     const data = Object.fromEntries(new FormData(e.target));
     const location = type === "delivery" ? d.location : null;
-    save("em_checkout", { name: data.name, phone: data.phone, address: data.address, location });
+    save("em_checkout", { name: data.name, phone: data.phone, address: data.address, location, floor: d.floor, lift: d.lift });
     const payment = canPayByCard() ? d.payment : "cash";
     btn.disabled = true;
     try {
       const order = await api("/api/orders", {
         method: "POST",
-        body: { ...data, location, payment, orderType: type, items: cartLines().map((l) => ({ id: l.p.id, qty: l.qty })) },
+        body: { ...data, floor: Number(d.floor), lift: d.lift, location, payment, orderType: type, items: cartLines().map((l) => ({ id: l.p.id, qty: l.qty })) },
       });
       if (order.invoiceLink) {
         const status = await openInvoice(order.invoiceLink);
@@ -1184,6 +1233,7 @@ function orderSheet(id, admin) {
       body.innerHTML = `<h3>${orderNo(o)} · ${orderState(o)}</h3>
         <ul class="kit-parts">${lines}</ul>
         <dl class="specs">
+          ${o.delivery ? `<dt>Mahsulotlar</dt><dd>${sum(o.goodsTotal)} so'm</dd><dt>Yetkazish</dt><dd>${sum(o.delivery.total)} so'm${o.delivery.km === null ? "" : ` · ${o.delivery.km} km`} · ${o.delivery.floor}-qavat${o.delivery.lift ? ", lift" : ""}</dd>` : ""}
           <dt>Jami</dt><dd><b>${sum(o.total)} so'm</b></dd>
           <dt>To'lov</dt><dd>${o.payment === "card" ? "💳 Karta" : "💵 Naqd"}</dd>
           <dt>Turi</dt><dd>${o.orderType === "pickup" ? "Olib ketish" : "Yetkazib berish"}</dd>
@@ -1255,6 +1305,74 @@ function orderSheet(id, admin) {
         toast(err.message);
       }
     };
+  };
+}
+
+// ---------- delivery rates (admin) ----------
+// Accepts "41.31, 69.27" or a Google / Yandex Maps link with coordinates in it.
+function parseCoords(text) {
+  const m = /(-?\d{1,2}\.\d+)\s*[, ]\s*(-?\d{1,3}\.\d+)/.exec(String(text));
+  if (!m) return null;
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  // Yandex links put longitude first; Uzbekistan's latitude is below its longitude.
+  return a > b ? { lat: b, lon: a } : { lat: a, lon: b };
+}
+
+function deliverySettingsSheet(body) {
+  let cfg = null;
+  const draw = () => {
+    if (!cfg) {
+      body.innerHTML = '<p class="empty">Yuklanmoqda…</p>';
+      return;
+    }
+    const sample = 12 * cfg.perKm + cfg.unloading + Math.max(0, 5 - cfg.freeFloors) * cfg.perFloor;
+    body.innerHTML = `<h3>Yetkazish narxlari</h3>
+      <form id="deliveryForm">
+        <label class="field">1 km narxi (so'm)<input name="perKm" type="number" inputmode="numeric" min="0" value="${cfg.perKm}" /></label>
+        <label class="field">Tushirib berish, har buyurtma (so'm)<input name="unloading" type="number" inputmode="numeric" min="0" value="${cfg.unloading}" /></label>
+        <div class="row2">
+          <label class="field">Liftsiz, har qavat (so'm)<input name="perFloor" type="number" inputmode="numeric" min="0" value="${cfg.perFloor}" /></label>
+          <label class="field">Bepul qavatlar<input name="freeFloors" type="number" inputmode="numeric" min="0" max="30" value="${cfg.freeFloors}" /></label>
+        </div>
+        <label class="field">Ombor lokatsiyasi (masofa shu yerdan)<input name="warehouse" placeholder="41.311, 69.279 yoki xarita havolasi" value="${cfg.warehouse ? `${cfg.warehouse.lat}, ${cfg.warehouse.lon}` : ""}" /></label>
+        <button type="button" class="auto-btn" data-here>📍 Hozir ombordaman: joylashuvimni olish</button>
+        ${cfg.warehouse ? "" : '<p class="hint">⚠️ Ombor lokatsiyasi kiritilmagan: hozircha masofa narxi hisoblanmaydi.</p>'}
+        <p class="hint">Misol: 12 km, 5-qavat, liftsiz = ${sum(sample)} so'm. Masofa: to'g'ri chiziq × 1,3 (yo'l egriligi).</p>
+        <button class="btn" type="submit">Saqlash</button>
+      </form>`;
+  };
+  draw();
+  api("/api/delivery/settings")
+    .then((data) => {
+      cfg = data;
+      draw();
+    })
+    .catch((err) => toast(err.message));
+  body.onclick = async (e) => {
+    if (!e.target.closest("[data-here]")) return;
+    try {
+      const loc = await requestLocation();
+      body.querySelector("[name=warehouse]").value = `${loc.lat.toFixed(6)}, ${loc.lon.toFixed(6)}`;
+    } catch (err) {
+      toast(err.message);
+    }
+  };
+  body.onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const raw = String(f.get("warehouse") || "").trim();
+    const warehouse = raw ? parseCoords(raw) : null;
+    if (raw && !warehouse) return toast("Lokatsiyani tushunmadim: 41.311, 69.279 ko'rinishida yozing");
+    try {
+      cfg = await api("/api/delivery/settings", {
+        method: "PUT",
+        body: { perKm: f.get("perKm"), unloading: f.get("unloading"), perFloor: f.get("perFloor"), freeFloors: f.get("freeFloors"), warehouse },
+      });
+      toast("Saqlandi");
+      draw();
+    } catch (err) {
+      toast(err.message);
+    }
   };
 }
 
@@ -1477,6 +1595,7 @@ function openDrawer() {
     ...(isAdmin()
       ? [
           ["orders", "📋  Buyurtmalar"],
+          ["delivery", "🚚  Yetkazish narxlari"],
           ["admin", "⚙️  Mahsulotlarni boshqarish"],
           ["banners", "🖼  Bannerlar va aksiyalar"],
           ["staff", "👥  Xodimlar"],
@@ -1509,6 +1628,7 @@ $("#drawerNav").onclick = (e) => {
   if (k === "screens") openSheet(screensSheet);
   if (k === "mine") openSheet(ordersListSheet(false));
   if (k === "orders") openSheet(ordersListSheet(true));
+  if (k === "delivery") openSheet(deliverySettingsSheet);
   if (k.startsWith("cat:")) document.querySelector(`[data-tab="${k.slice(4)}"]`)?.click();
 };
 

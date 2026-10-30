@@ -143,6 +143,18 @@ Admin va omborchilar ham shu amallarni Telegram orqali bajarishi mumkin (API bir
 Bu versiyani yuklagandan keyin `/api/setup` ni **qayta oching**: mavjud mahsulotlarga SKU beriladi va bot
 "Qabul qildim" tugmalarini qabul qiladigan bo'ladi.
 
+## Yetkazish narxi
+
+Rasmiylashtirishda mijoz joylashuv, qavat va "Lift bor" ni kiritadi; narx serverda hisoblanib, to'lashdan oldin ko'rinadi
+va jami summaga (karta to'lovida alohida "Yetkazib berish" qatori bo'lib) qo'shiladi:
+
+`masofa (km) × 1 km narxi + tushirib berish + (liftsiz bo'lsa) (qavat − bepul qavatlar) × qavat narxi`
+
+- Boshlang'ich qiymatlar: 1 km = 1 500, tushirib berish = 100 000, liftsiz har qavat = 20 000, bepul qavatlar = 2.
+- Admin: ☰ → **🚚 Yetkazish narxlari** — narxlar va **ombor lokatsiyasi** ("📍 Hozir ombordaman" yoki koordinata / xarita havolasi).
+  Ombor lokatsiyasi kiritilmaguncha masofa narxi 0 hisoblanadi va guruhdagi xabarda ogohlantirish chiqadi.
+- Masofa: to'g'ri chiziq × 1,3 (yo'l egriligi uchun taxmin). Olib ketishda yetkazish puli yo'q.
+
 ## Yetkazish vaqtini tanlash
 
 Yetkaziladigan buyurtma ombordan **Tayyor** bo'lganda mijozga bot xabar yuboradi: "Qachon yetkazib beraylik?" va
