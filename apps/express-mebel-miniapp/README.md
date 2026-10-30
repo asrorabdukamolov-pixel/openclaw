@@ -166,7 +166,7 @@ Bekor qilish (hamma buyurtma ombordan yuboriladi, qoida bir xil):
 
 | Bosqich | Kim | Nima bo'ladi |
 | --- | --- | --- |
-| Qabul qilindi | Mijoz o'zi (chekdagi "❌ Buyurtmani bekor qilish" yoki ilovada) | Darhol bekor, tovar qoldiqqa qaytadi |
+| Qabul qilindi | Mijoz o'zi: ☰ → 🧾 Mening buyurtmalarim | Darhol bekor, tovar qoldiqqa qaytadi |
 | Tayyorlanmoqda / Tayyor | Mijoz so'raydi, admin guruhda yoki ilovada tasdiqlaydi | "Qutilarni polkaga qaytaring", qoldiq qaytadi |
 | Yo'lda va keyin | Bekor qilinmaydi | "Muammo bor" / qaytarish operator orqali |
 

@@ -738,8 +738,7 @@ async function notifyOrder(id, order) {
       await tg("sendMessage", {
         chat_id: order.telegramUserId,
         parse_mode: "HTML",
-        text: `✅ Buyurtmangiz #${order.number} qabul qilindi!${paid}\n\n${lines.join("\n")}\n\n<b>Jami:</b> ${formatSum(order.total)}\n\nMebel tayyor bo'lgach, yetkazish vaqtini tanlashingizni so'raymiz. Fikringiz o'zgarsa, ombor ishni boshlaguncha bekor qilishingiz mumkin.`,
-        reply_markup: { inline_keyboard: [[{ text: "❌ Buyurtmani bekor qilish", callback_data: `can:${id}` }]] },
+        text: `✅ Buyurtmangiz #${order.number} qabul qilindi!${paid}\n\n${lines.join("\n")}\n\n<b>Jami:</b> ${formatSum(order.total)}\n\nMebel tayyor bo'lgach, yetkazish vaqtini tanlashingizni so'raymiz.`,
       });
     }
   } catch (err) {
@@ -1152,13 +1151,6 @@ const CANCEL_REASONS = {
 const SELF_CANCEL_STAGES = ["new"];
 const ADMIN_CANCEL_STAGES = ["new", "picking", "ready"];
 
-const reasonKeyboard = (id) => ({
-  inline_keyboard: [
-    ...Object.entries(CANCEL_REASONS).map(([code, text]) => [{ text, callback_data: `canr:${id}:${code}` }]),
-    [{ text: "◀️ Bekor qilmayman", callback_data: `cann:${id}` }],
-  ],
-});
-
 async function cancelOrder(id, { stages, reason, by }) {
   const ref = ordersCol.doc(id);
   const result = await db.runTransaction(async (t) => {
@@ -1245,25 +1237,9 @@ async function rejectCancel(id, by) {
   }
 }
 
-// Buttons of the cancel flow: the buyer's (can, canr, cann) and the admins' in the orders chat (cana, canx).
-async function handleCancelCallback(q, action, id, code) {
-  if (action === "cann") return { answer: "Buyurtma davom etadi", close: true };
-  if (action === "can") {
-    const snap = await ordersCol.doc(id).get();
-    if (!snap.exists || snap.data().telegramUserId !== q.from.id) return { answer: "Buyurtma topilmadi" };
-    await tg("sendMessage", { chat_id: q.from.id, text: "Nima uchun bekor qilmoqchisiz?", reply_markup: reasonKeyboard(id) });
-    return { answer: "" };
-  }
-  if (action === "canr") {
-    const r = await buyerCancel(id, q.from.id, code);
-    if (r.requested) {
-      await tg("sendMessage", {
-        chat_id: q.from.id,
-        text: "Buyurtmangiz omborda tayyorlangan. So'rovingiz operatorga yuborildi, tasdiqlangach bekor qilinadi.",
-      });
-    }
-    return { answer: r.cancelled ? "Bekor qilindi" : "So'rov yuborildi", close: true };
-  }
+// The admins' buttons on a buyer's cancel request in the orders chat. Buyers cancel from
+// "Mening buyurtmalarim" in the mini app; the receipt deliberately carries no cancel button.
+async function handleCancelCallback(q, action, id) {
   if (!isAdminId(q.from.id)) return { answer: "Faqat admin" };
   const by = `Admin ${staffName(q.from)}`;
   if (action === "cana") {
@@ -1287,9 +1263,9 @@ async function handleCallback(q) {
       closeButtons = Boolean(r.close);
       return;
     }
-    if (["can", "canr", "cann", "cana", "canx"].includes(action)) {
+    if (action === "cana" || action === "canx") {
       // Refusals (wrong stage, already cancelled) answer on the button instead of failing the webhook.
-      const r = await handleCancelCallback(q, action, id || "-", slotKey).catch((err) => {
+      const r = await handleCancelCallback(q, action, id || "-").catch((err) => {
         if (!(err instanceof HttpError)) throw err;
         return { answer: err.message.slice(0, 190), close: true };
       });
