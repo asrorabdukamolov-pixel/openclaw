@@ -30,6 +30,7 @@ const state = {
   categories: [],
   products: [],
   role: null, // "admin" | "warehouse" | null
+  user: null, // Telegram user when opened inside Telegram
   query: "",
   orderType: load("em_order_type", null),
   cart: load("em_cart", {}),
@@ -761,7 +762,7 @@ function productForm(id, newKind = "item") {
       const q = partSearch.value.trim().toLowerCase();
       const found = q ? stocked().filter((m) => `${m.name} ${m.sku ?? ""}`.toLowerCase().includes(q)).slice(0, 6) : [];
       partResults.innerHTML = found
-        .map((m) => `<button type="button" class="admin-item" data-part-pick="${m.id}"><div><div class="line-name">${esc(m.name)}</div><small>SKU ${m.sku ?? "—"} · ${m.boxes ?? 1} quti · omborda ${m.stock}</small></div><span class="chip">＋ Qo'shish</span></button>`)
+        .map((m) => `<button type="button" class="admin-item text-row" data-part-pick="${m.id}"><div><div class="line-name">${esc(m.name)}</div><small>SKU ${m.sku ?? "—"} · ${m.boxes ?? 1} quti · omborda ${m.stock}</small></div><span class="chip">＋ Qo'shish</span></button>`)
         .join("");
     };
     if (partSearch) {
@@ -1068,6 +1069,195 @@ function screensSheet(body) {
   };
 }
 
+// ---------- orders: the buyer's history and the admin archive ----------
+const STAGE_LABEL = {
+  new: "Qabul qilindi",
+  picking: "Tayyorlanmoqda",
+  ready: "Tayyor",
+  shipped: "Yo'lda",
+  delivered: "Yakunlandi",
+  problem: "Muammo",
+  cancelled: "Bekor qilingan",
+};
+// Same codes as the server's CANCEL_REASONS.
+const CANCEL_REASONS = [
+  ["hasty", "Shoshilib buyurtma berdim"],
+  ["cheaper", "Arzonroq topdim"],
+  ["slow", "Kutish uzoq"],
+  ["change", "Boshqa mahsulot tanlayman"],
+  ["other", "Boshqa sabab"],
+];
+const ORDER_FILTERS = [
+  ["active", "Faol"],
+  ["done", "Yakunlangan"],
+  ["cancelled", "Bekor"],
+  ["all", "Hammasi"],
+];
+const orderNo = (o) => (o.number ? `#${o.number}` : `#${o.id.slice(-5).toUpperCase()}`);
+const orderState = (o) => (o.stage === null ? (o.status === "paid_after_cancel" ? "To'lov kech keldi" : "To'lov kutilmoqda") : STAGE_LABEL[o.stage] || o.stage);
+const orderGroup = (o) => (o.stage === "delivered" ? "done" : o.stage === "cancelled" ? "cancelled" : "active");
+
+function orderRowHtml(o) {
+  const flags = [
+    o.cancelRequest ? '<span class="chip chip--draft">🙋 Bekor qilish so\'ralgan</span>' : "",
+    o.refund?.status === "pending" ? '<span class="chip chip--draft">💳 Pul qaytarish kerak</span>' : "",
+  ].join("");
+  return `<button class="admin-item text-row order-row" data-order="${o.id}">
+    <div><div class="line-name">${orderNo(o)} · ${sum(o.total)} so'm</div>
+      <small>${when(o.createdAt)} · ${esc(o.lines.map((l) => `${l.name} × ${l.qty}`).join(", "))}</small>
+      ${flags ? `<div class="chips">${flags}</div>` : ""}</div>
+    <span class="chip ${o.stage === "cancelled" ? "chip--off" : ""}">${orderState(o)}</span>
+  </button>`;
+}
+
+function ordersListSheet(admin) {
+  let filter = admin ? "active" : "all";
+  let query = "";
+  let list = null;
+  return (body) => {
+    const draw = () => {
+      const q = query.trim().toLowerCase();
+      const shown = (list || [])
+        .filter((o) => filter === "all" || orderGroup(o) === filter)
+        .filter((o) => !q || `${o.number} ${o.name} ${o.phone}`.toLowerCase().includes(q));
+      const asks = (list || []).filter((o) => o.cancelRequest).length;
+      const refunds = (list || []).filter((o) => o.refund?.status === "pending").length;
+      body.querySelector("#orderList").innerHTML =
+        list === null
+          ? '<p class="empty">Yuklanmoqda…</p>'
+          : shown.length
+            ? shown.map(orderRowHtml).join("")
+            : `<p class="empty">${admin ? "Buyurtma topilmadi" : "Hali buyurtma bermagansiz"}</p>`;
+      if (admin) body.querySelector("#orderAlerts").textContent = asks || refunds ? `🙋 ${asks} ta bekor qilish so'rovi · 💳 ${refunds} ta pul qaytarish` : "";
+      body.querySelectorAll("[data-filter]").forEach((b) => b.classList.toggle("on", b.dataset.filter === filter));
+    };
+    body.innerHTML = `<h3>${admin ? "Buyurtmalar" : "Mening buyurtmalarim"}</h3>
+      ${
+        admin
+          ? `<p class="hint" id="orderAlerts"></p>
+             <div class="seg seg--4">${ORDER_FILTERS.map(([k, label]) => `<button type="button" data-filter="${k}">${label}</button>`).join("")}</div>
+             <label class="field"><input id="orderSearch" type="search" placeholder="Raqam, ism yoki telefon" /></label>`
+          : ""
+      }
+      <div id="orderList"></div>`;
+    draw();
+    api(admin ? "/api/orders" : "/api/orders/mine")
+      .then((data) => {
+        list = data;
+        draw();
+      })
+      .catch((err) => toast(err.message));
+    const search = body.querySelector("#orderSearch");
+    if (search) {
+      search.oninput = (e) => {
+        query = e.target.value;
+        draw();
+      };
+    }
+    body.onclick = (e) => {
+      const f = e.target.closest("[data-filter]");
+      if (f) {
+        filter = f.dataset.filter;
+        draw();
+      }
+      const row = e.target.closest("[data-order]");
+      if (row) openSheet(orderSheet(row.dataset.order, admin));
+    };
+  };
+}
+
+function orderSheet(id, admin) {
+  let o = null;
+  let picking = false; // reason picker open
+  return (body) => {
+    const draw = () => {
+      if (!o) {
+        body.innerHTML = '<p class="empty">Yuklanmoqda…</p>';
+        return;
+      }
+      const lines = o.lines.map((l) => `<li><span>${esc(l.name)}${l.kind === "kit" ? " <small>komplekt</small>" : ""}</span><b>× ${l.qty}</b><b>${sum(l.price * l.qty)}</b></li>`).join("");
+      const timeline = o.timeline.map((t) => `<li><small>${when(t.at)}</small><span>${esc(t.text)}</span></li>`).join("");
+      const canSelf = !admin && o.stage === "new";
+      const canAsk = !admin && (o.stage === "picking" || o.stage === "ready") && !o.cancelRequest;
+      const canAdmin = admin && ["new", "picking", "ready"].includes(o.stage);
+      const reorder = !admin && (o.stage === "delivered" || o.stage === "cancelled");
+      body.innerHTML = `<h3>${orderNo(o)} · ${orderState(o)}</h3>
+        <ul class="kit-parts">${lines}</ul>
+        <dl class="specs">
+          <dt>Jami</dt><dd><b>${sum(o.total)} so'm</b></dd>
+          <dt>To'lov</dt><dd>${o.payment === "card" ? "💳 Karta" : "💵 Naqd"}</dd>
+          <dt>Turi</dt><dd>${o.orderType === "pickup" ? "Olib ketish" : "Yetkazib berish"}</dd>
+          ${o.deliveryLabel ? `<dt>Yetkazish</dt><dd>🗓 ${esc(o.deliveryLabel)}</dd>` : ""}
+          ${admin ? `<dt>Mijoz</dt><dd>${esc(o.name)}, ${esc(o.phone)}</dd>` : ""}
+          ${o.address ? `<dt>Manzil</dt><dd>${esc(o.address)}</dd>` : ""}
+          ${o.comment ? `<dt>Izoh</dt><dd>${esc(o.comment)}</dd>` : ""}
+          ${o.refund ? `<dt>Qaytarish</dt><dd>💳 ${sum(o.refund.amount)} so'm · ${o.refund.status === "done" ? "qaytarildi" : "kutilmoqda"}</dd>` : ""}
+        </dl>
+        ${o.cancelRequest ? `<p class="hint">🙋 Mijoz bekor qilishni so'ragan: ${esc(o.cancelRequest.reason)}</p>` : ""}
+        <h4 class="sub">Tarix</h4>
+        <ul class="timeline">${timeline}</ul>
+        <div id="orderActions" class="stack" style="margin-top:14px"></div>`;
+      const actions = body.querySelector("#orderActions");
+      if (picking) {
+        actions.innerHTML = admin
+          ? `<label class="field">Bekor qilish sababi<input id="cancelReason" placeholder="Masalan: mijoz qo'ng'iroq qilib bekor qildi" /></label>
+             <button class="btn btn--danger" data-act="admin-cancel">Bekor qilish</button>
+             <button class="btn btn--ghost" data-act="back">Orqaga</button>`
+          : `<p class="field">Nima uchun bekor qilmoqchisiz?</p>
+             ${CANCEL_REASONS.map(([code, text]) => `<button class="btn btn--ghost" data-reason="${code}">${text}</button>`).join("")}
+             <button class="btn btn--ghost" data-act="back">◀️ Bekor qilmayman</button>`;
+        return;
+      }
+      actions.innerHTML = [
+        canSelf ? '<button class="btn btn--danger" data-act="pick">❌ Buyurtmani bekor qilish</button>' : "",
+        canAsk ? '<button class="btn btn--ghost" data-act="pick">Bekor qilishni so\'rash</button>' : "",
+        !admin && o.cancelRequest ? '<p class="hint">Bekor qilish so\'rovingiz operatorda.</p>' : "",
+        reorder ? '<button class="btn" data-act="reorder">🔁 Qayta buyurtma berish</button>' : "",
+        admin && o.cancelRequest ? '<button class="btn btn--danger" data-act="approve">✅ Bekor qilishni tasdiqlash</button><button class="btn btn--ghost" data-act="reject">↩️ So\'rovni rad etish</button>' : "",
+        canAdmin && !o.cancelRequest ? '<button class="btn btn--ghost" data-act="pick">❌ Bekor qilish</button>' : "",
+        admin && o.refund?.status === "pending" ? '<button class="btn" data-act="refunded">💳 Pul qaytarildi</button>' : "",
+      ].join("");
+    };
+    const refresh = async () => {
+      o = await api(`/api/orders/${id}`);
+      draw();
+    };
+    draw();
+    refresh().catch((err) => toast(err.message));
+    body.onclick = async (e) => {
+      const act = e.target.closest("[data-act]")?.dataset.act;
+      const reason = e.target.closest("[data-reason]")?.dataset.reason;
+      if (act === "pick" || act === "back") {
+        picking = act === "pick";
+        return draw();
+      }
+      if (act === "reorder") {
+        const again = o.lines.filter((l) => byId(l.id)?.listed && byId(l.id).stock > 0);
+        if (!again.length) return toast("Bu mahsulotlar hozir sotuvda yo'q");
+        for (const l of again) setQty(l.id, Math.min(l.qty, byId(l.id).stock));
+        return openSheet(cartSheet);
+      }
+      const call = {
+        reason: () => api(`/api/orders/${id}/buyer-cancel`, { method: "POST", body: { reason } }),
+        "admin-cancel": () => api(`/api/orders/${id}/admin-cancel`, { method: "POST", body: { reason: body.querySelector("#cancelReason").value } }),
+        approve: () => api(`/api/orders/${id}/admin-cancel`, { method: "POST", body: { reason: o.cancelRequest.reason } }),
+        reject: () => api(`/api/orders/${id}/reject-cancel`, { method: "POST" }),
+        refunded: () => api(`/api/orders/${id}/refunded`, { method: "POST" }),
+      }[reason ? "reason" : act];
+      if (!call) return;
+      try {
+        const r = await call();
+        toast(r.requested ? "So'rov operatorga yuborildi" : "Saqlandi");
+        picking = false;
+        await refresh();
+        await reload().catch(() => {});
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+  };
+}
+
 // ---------- staff (admin) ----------
 const STAFF_ROLE_LABEL = { warehouse: "Omborchi" };
 
@@ -1281,10 +1471,12 @@ function openDrawer() {
   const items = [
     ["cart", "🛒  Savat"],
     ["type", "🚚  Buyurtma turi"],
+    ...(state.user ? [["mine", "🧾  Mening buyurtmalarim"]] : []),
     ...state.categories.map((c) => [`cat:${c.id}`, c.name]),
     ...(isStaff() ? [["stock", "📦  Ombor"]] : []),
     ...(isAdmin()
       ? [
+          ["orders", "📋  Buyurtmalar"],
           ["admin", "⚙️  Mahsulotlarni boshqarish"],
           ["banners", "🖼  Bannerlar va aksiyalar"],
           ["staff", "👥  Xodimlar"],
@@ -1315,6 +1507,8 @@ $("#drawerNav").onclick = (e) => {
   if (k === "banners") openSheet(bannersSheet);
   if (k === "staff") openSheet(staffSheet);
   if (k === "screens") openSheet(screensSheet);
+  if (k === "mine") openSheet(ordersListSheet(false));
+  if (k === "orders") openSheet(ordersListSheet(true));
   if (k.startsWith("cat:")) document.querySelector(`[data-tab="${k.slice(4)}"]`)?.click();
 };
 
@@ -1369,6 +1563,7 @@ async function reload() {
     const config = await api("/api/config");
     state.categories = config.categories;
     state.role = config.role;
+    state.user = config.user;
     state.cardPayments = config.cardPayments;
     await reload();
   } catch (err) {

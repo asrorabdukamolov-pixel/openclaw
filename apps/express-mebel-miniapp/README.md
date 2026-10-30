@@ -156,6 +156,23 @@ eng yaqin bo'sh 4 ta vaqt (ertadan boshlab, yakshanbasiz; 10:00–13:00 va 14:00
 - 3 soatda tanlanmasa mijozga eslatma, 24 soatda tanlanmasa guruhga "qo'ng'iroq qiling" (`remindSlots`, har soatda).
 - "Operator bilan kelishish" bosilsa, guruhga mijozning ismi va telefoni bilan xabar boradi.
 
+## Buyurtmalar arxivi va bekor qilish
+
+- **Mijoz**: ☰ → **🧾 Mening buyurtmalarim** — holati, tarixi, "Qayta buyurtma berish".
+- **Admin**: ☰ → **📋 Buyurtmalar** — Faol / Yakunlangan / Bekor / Hammasi, raqam, ism yoki telefon bo'yicha qidiruv,
+  har buyurtmaning bosqichlar tarixi (kim, qachon). Buyurtmalar Firestore `orders` da o'chmasdan saqlanadi.
+
+Bekor qilish (hamma buyurtma ombordan yuboriladi, qoida bir xil):
+
+| Bosqich | Kim | Nima bo'ladi |
+| --- | --- | --- |
+| Qabul qilindi | Mijoz o'zi (chekdagi "❌ Buyurtmani bekor qilish" yoki ilovada) | Darhol bekor, tovar qoldiqqa qaytadi |
+| Tayyorlanmoqda / Tayyor | Mijoz so'raydi, admin guruhda yoki ilovada tasdiqlaydi | "Qutilarni polkaga qaytaring", qoldiq qaytadi |
+| Yo'lda va keyin | Bekor qilinmaydi | "Muammo bor" / qaytarish operator orqali |
+
+Har bekor qilishda sabab yoziladi. To'langan karta buyurtmasida "💳 Pul qaytarish kerak" vazifasi chiqadi: pul
+Click/Payme kabinetida qaytariladi, so'ng admin **"Pul qaytarildi"** ni bosadi va mijozga xabar boradi.
+
 ## Komplektlar (oshxona va boshqa yig'ma mahsulotlar)
 
 Mahsulot uch darajada: **quti** (shtrix-kod `EM<SKU>-<quti>`) → **modul / mahsulot** (SKU, qoldiq shu yerda) → **komplekt**

@@ -612,7 +612,7 @@ async function handleOrder(req, res) {
   });
 
   if (payment === "cash") {
-    await notifyOrder(order);
+    await notifyOrder(orderRef.id, order);
     return res.status(201).json({ ok: true, orderId: orderRef.id, total: order.total });
   }
   try {
@@ -682,7 +682,7 @@ async function releaseOrder(orderId, fromStatuses, reason) {
   });
 }
 
-async function notifyOrder(order) {
+async function notifyOrder(id, order) {
   const lines = order.items.map((i) => `• ${escapeHtml(i.name)} × ${i.qty} = ${formatSum(i.price * i.qty)}`);
   const who = order.telegramUserId
     ? `${escapeHtml(order.name)}${order.telegramUsername ? ` (@${escapeHtml(order.telegramUsername)})` : ""}`
@@ -738,7 +738,8 @@ async function notifyOrder(order) {
       await tg("sendMessage", {
         chat_id: order.telegramUserId,
         parse_mode: "HTML",
-        text: `✅ Buyurtmangiz #${order.number} qabul qilindi!${paid}\n\n${lines.join("\n")}\n\n<b>Jami:</b> ${formatSum(order.total)}\n\nTez orada operatorimiz siz bilan bog'lanadi.`,
+        text: `✅ Buyurtmangiz #${order.number} qabul qilindi!${paid}\n\n${lines.join("\n")}\n\n<b>Jami:</b> ${formatSum(order.total)}\n\nMebel tayyor bo'lgach, yetkazish vaqtini tanlashingizni so'raymiz. Fikringiz o'zgarsa, ombor ishni boshlaguncha bekor qilishingiz mumkin.`,
+        reply_markup: { inline_keyboard: [[{ text: "❌ Buyurtmani bekor qilish", callback_data: `can:${id}` }]] },
       });
     }
   } catch (err) {
@@ -790,7 +791,7 @@ async function handleSuccessfulPayment(msg) {
     return { order: { ...order, status } };
   });
   if (!result || result.duplicate) return;
-  if (result.order.status === "paid") return notifyOrder(result.order);
+  if (result.order.status === "paid") return notifyOrder(ref.id, result.order);
   await tg("sendMessage", {
     chat_id: ordersChat(),
     text: `⚠️ To'lov bron bekor qilingandan keyin keldi: buyurtma ${ref.id}, ${formatSum(result.order.total)}. Omborni tekshirib, mijoz bilan bog'laning.`,
@@ -848,6 +849,51 @@ function fulfillmentView(id, o) {
 }
 
 const ORDER_LABEL = (o) => (o.number ? `#${o.number}` : "");
+
+// ---------- order history ----------
+const ORDER_LIST_LIMIT = 300;
+
+function orderSummary(id, o) {
+  return {
+    id,
+    number: o.number ?? null,
+    createdAt: o.createdAt,
+    status: o.status,
+    stage: o.stage ?? null,
+    payment: o.payment,
+    orderType: o.orderType,
+    total: o.total,
+    name: o.name,
+    phone: o.phone,
+    lines: o.items.map((i) => ({ id: i.id, name: i.name, qty: i.qty, price: i.price, kind: i.kind ?? "item" })),
+    deliveryLabel: o.deliveryLabel ?? null,
+    cancelRequest: o.cancelRequest ?? null,
+    refund: o.refund ?? null,
+  };
+}
+
+// Full card for the archive: who did what and when, in order.
+function orderDetail(id, o) {
+  const steps = [
+    ["createdAt", "Buyurtma berildi"],
+    ["paidAt", "To'lov qabul qilindi"],
+    ["pickingAt", `Terish boshlandi${o.pickingBy ? ` · ${o.pickingBy}` : ""}`],
+    ["readyAt", "Tayyor"],
+    ["slotChosenAt", `Yetkazish vaqti tanlandi${o.deliveryLabel ? `: ${o.deliveryLabel}` : ""}`],
+    ["shippedAt", `Jo'natildi${o.shippedBy ? ` · ${o.shippedBy}` : ""}`],
+    ["deliveredAt", o.autoClosed ? "Avtomatik yopildi" : "Mijoz qabul qildi"],
+    ["problemAt", "Mijoz muammo bildirdi"],
+    ["cancelledAt", `Bekor qilindi${o.cancelledBy ? ` · ${o.cancelledBy}` : ""}${o.cancelReason ? `: ${o.cancelReason}` : ""}`],
+  ];
+  return {
+    ...orderSummary(id, o),
+    address: o.address,
+    comment: o.comment,
+    location: o.location ?? null,
+    picked: pickLines(o).map((i) => ({ name: i.name, qty: i.qty, sku: i.sku ?? null, boxes: i.boxes ?? 1 })),
+    timeline: steps.filter(([key]) => o[key]).map(([key, text]) => ({ at: o[key], text })).sort((a, b) => a.at - b.at),
+  };
+}
 
 // ---------- delivery slots ----------
 // When a delivery order is ready the buyer picks a window from the bot. A slot key is
@@ -1091,6 +1137,144 @@ async function pickBox(id, body, actor) {
   return result;
 }
 
+// ---------- cancellation ----------
+// Every order ships from stock, so one rule fits all: the buyer cancels alone until the warehouse
+// starts picking; once boxes are picked an admin confirms (they go back on the shelves); a shipped
+// order is a return, not a cancellation. A paid card order leaves a refund task for the admin,
+// since Click/Payme refunds are made in the provider's cabinet.
+const CANCEL_REASONS = {
+  hasty: "Shoshilib buyurtma berdim",
+  cheaper: "Arzonroq topdim",
+  slow: "Kutish uzoq",
+  change: "Boshqa mahsulot tanlayman",
+  other: "Boshqa sabab",
+};
+const SELF_CANCEL_STAGES = ["new"];
+const ADMIN_CANCEL_STAGES = ["new", "picking", "ready"];
+
+const reasonKeyboard = (id) => ({
+  inline_keyboard: [
+    ...Object.entries(CANCEL_REASONS).map(([code, text]) => [{ text, callback_data: `canr:${id}:${code}` }]),
+    [{ text: "◀️ Bekor qilmayman", callback_data: `cann:${id}` }],
+  ],
+});
+
+async function cancelOrder(id, { stages, reason, by }) {
+  const ref = ordersCol.doc(id);
+  const result = await db.runTransaction(async (t) => {
+    const snap = await t.get(ref);
+    if (!snap.exists) throw new HttpError(404, "Buyurtma topilmadi");
+    const o = snap.data();
+    if (!stages.includes(o.stage)) throw new HttpError(409, "Buyurtmani bu bosqichda bekor qilib bo'lmaydi");
+    const lines = pickLines(o);
+    const refs = lines.map((i) => productsCol.doc(i.id));
+    const products = await t.getAll(...refs);
+    products.forEach((p, i) => {
+      if (p.exists) moveStock(t, refs[i], p.data(), "release", lines[i].qty, `Bekor qilindi ${ORDER_LABEL(o)}`, by);
+    });
+    const paid = o.status === "paid";
+    const update = {
+      status: "cancelled",
+      stage: "cancelled",
+      stageAt: Date.now(),
+      cancelledAt: Date.now(),
+      cancelledFromStage: o.stage,
+      cancelReason: reason,
+      cancelledBy: by,
+      cancelRequest: null,
+      ...(paid ? { refund: { status: "pending", amount: o.paidAmount ?? o.total } } : {}),
+    };
+    t.update(ref, update);
+    return { ...o, ...update };
+  });
+  const picked = result.cancelledFromStage !== "new";
+  const refund = result.refund ? `\n💳 Kartaga ${formatSum(result.refund.amount)} qaytarish kerak (Click/Payme kabinetida), so'ng ☰ → Buyurtmalar → "Pul qaytarildi".` : "";
+  await tg("sendMessage", {
+    chat_id: ordersChat(),
+    text: `❌ ${ORDER_LABEL(result)} bekor qilindi (${by}).\nSabab: ${reason}${picked ? "\n📦 Terilgan qutilarni polkaga qaytaring." : ""}${refund}`,
+  }).catch((err) => logger.warn("cancel notice failed", err));
+  if (result.telegramUserId) {
+    await tg("sendMessage", {
+      chat_id: result.telegramUserId,
+      text: `❌ Buyurtmangiz ${ORDER_LABEL(result)} bekor qilindi.${result.refund ? `\n💳 ${formatSum(result.refund.amount)} kartangizga qaytariladi, qaytarilganda xabar beramiz.` : ""}`,
+    }).catch((err) => logger.warn("cancel buyer notice failed", err));
+  }
+  return result;
+}
+
+// The buyer's cancel: immediate before picking, otherwise a request the admins confirm.
+async function buyerCancel(id, userId, code) {
+  const reason = CANCEL_REASONS[code];
+  if (!reason) throw new HttpError(400, "Sabab noto'g'ri");
+  const snap = await ordersCol.doc(id).get();
+  const o = snap.data();
+  if (!snap.exists || o.telegramUserId !== userId) throw new HttpError(404, "Buyurtma topilmadi");
+  if (o.stage === "cancelled") throw new HttpError(409, "Buyurtma allaqachon bekor qilingan");
+  if (SELF_CANCEL_STAGES.includes(o.stage)) {
+    await cancelOrder(id, { stages: SELF_CANCEL_STAGES, reason, by: "Mijoz" });
+    return { cancelled: true };
+  }
+  if (!ADMIN_CANCEL_STAGES.includes(o.stage)) {
+    throw new HttpError(409, "Jo'natilgan buyurtmani bekor qilib bo'lmaydi. Qaytarish uchun \"Muammo bor\" tugmasini bosing yoki operatorga yozing.");
+  }
+  if (o.cancelRequest) return { requested: true };
+  await ordersCol.doc(id).update({ cancelRequest: { reason, at: Date.now() } });
+  await tg("sendMessage", {
+    chat_id: ordersChat(),
+    text: `🙋 ${ORDER_LABEL(o)}: mijoz bekor qilmoqchi (buyurtma omborda: ${o.stage === "ready" ? "tayyor" : "terilmoqda"}).\nSabab: ${reason}\n${o.name}, ${o.phone}`,
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "✅ Bekor qilishni tasdiqlash", callback_data: `cana:${id}` }],
+        [{ text: "↩️ Rad etish (buyurtma davom etadi)", callback_data: `canx:${id}` }],
+      ],
+    },
+  });
+  return { requested: true };
+}
+
+async function rejectCancel(id, by) {
+  const ref = ordersCol.doc(id);
+  const o = (await ref.get()).data();
+  if (!o?.cancelRequest) throw new HttpError(409, "Bekor qilish so'rovi yo'q");
+  await ref.update({ cancelRequest: null, cancelRejectedBy: by, cancelRejectedAt: Date.now() });
+  if (o.telegramUserId) {
+    await tg("sendMessage", {
+      chat_id: o.telegramUserId,
+      text: `↩️ ${ORDER_LABEL(o)} bo'yicha bekor qilish so'rovi qabul qilinmadi, buyurtma davom etadi. Savollar bo'lsa, operatorimiz bog'lanadi.`,
+    }).catch(() => {});
+  }
+}
+
+// Buttons of the cancel flow: the buyer's (can, canr, cann) and the admins' in the orders chat (cana, canx).
+async function handleCancelCallback(q, action, id, code) {
+  if (action === "cann") return { answer: "Buyurtma davom etadi", close: true };
+  if (action === "can") {
+    const snap = await ordersCol.doc(id).get();
+    if (!snap.exists || snap.data().telegramUserId !== q.from.id) return { answer: "Buyurtma topilmadi" };
+    await tg("sendMessage", { chat_id: q.from.id, text: "Nima uchun bekor qilmoqchisiz?", reply_markup: reasonKeyboard(id) });
+    return { answer: "" };
+  }
+  if (action === "canr") {
+    const r = await buyerCancel(id, q.from.id, code);
+    if (r.requested) {
+      await tg("sendMessage", {
+        chat_id: q.from.id,
+        text: "Buyurtmangiz omborda tayyorlangan. So'rovingiz operatorga yuborildi, tasdiqlangach bekor qilinadi.",
+      });
+    }
+    return { answer: r.cancelled ? "Bekor qilindi" : "So'rov yuborildi", close: true };
+  }
+  if (!isAdminId(q.from.id)) return { answer: "Faqat admin" };
+  const by = `Admin ${staffName(q.from)}`;
+  if (action === "cana") {
+    const o = (await ordersCol.doc(id).get()).data();
+    await cancelOrder(id, { stages: ADMIN_CANCEL_STAGES, reason: o?.cancelRequest?.reason ?? "Admin bekor qildi", by });
+    return { answer: "Bekor qilindi", close: true };
+  }
+  await rejectCancel(id, by);
+  return { answer: "Rad etildi, buyurtma davom etadi", close: true };
+}
+
 async function handleCallback(q) {
   const [action, id, slotKey] = String(q.data || "").split(":");
   let answer = "";
@@ -1099,6 +1283,16 @@ async function handleCallback(q) {
   try {
     if (action === "slot") {
       const r = await handleSlotCallback(q, id || "-", slotKey);
+      answer = r.answer;
+      closeButtons = Boolean(r.close);
+      return;
+    }
+    if (["can", "canr", "cann", "cana", "canx"].includes(action)) {
+      // Refusals (wrong stage, already cancelled) answer on the button instead of failing the webhook.
+      const r = await handleCancelCallback(q, action, id || "-", slotKey).catch((err) => {
+        if (!(err instanceof HttpError)) throw err;
+        return { answer: err.message.slice(0, 190), close: true };
+      });
       answer = r.answer;
       closeButtons = Boolean(r.close);
       return;
@@ -1447,6 +1641,64 @@ async function route(req, res) {
   }
 
   if (path === "/api/orders" && method === "POST") return handleOrder(req, res);
+
+  if (path === "/api/orders" && method === "GET") {
+    await requireRole(req, "admin");
+    const snap = await ordersCol.orderBy("createdAt", "desc").limit(ORDER_LIST_LIMIT).get();
+    return res.json(snap.docs.map((d) => orderSummary(d.id, d.data())));
+  }
+
+  if (path === "/api/orders/mine" && method === "GET") {
+    const { user } = await authenticate(req);
+    if (!user) throw new HttpError(401, "Ilovani Telegram'da oching");
+    const snap = await ordersCol.where("telegramUserId", "==", user.id).get();
+    const list = snap.docs
+      .map((d) => orderSummary(d.id, d.data()))
+      // Unpaid card checkouts the buyer abandoned are noise in their history.
+      .filter((o) => o.stage !== null || o.status === "paid_after_cancel")
+      .sort((a, b) => b.createdAt - a.createdAt);
+    return res.json(list.slice(0, ORDER_LIST_LIMIT));
+  }
+
+  const orderMatch = path.match(/^\/api\/orders\/([\w-]{1,64})(?:\/(buyer-cancel|admin-cancel|reject-cancel|refunded))?$/);
+  if (orderMatch && orderMatch[1] !== "mine") {
+    const [, id, action] = orderMatch;
+    const { user, role } = await authenticate(req);
+    if (!action && method === "GET") {
+      const snap = await ordersCol.doc(id).get();
+      if (!snap.exists || !(role === "admin" || (user && snap.data().telegramUserId === user.id))) throw new HttpError(404, "Buyurtma topilmadi");
+      return res.json(orderDetail(id, snap.data()));
+    }
+    if (action === "buyer-cancel" && method === "POST") {
+      if (!user) throw new HttpError(401, "Ilovani Telegram'da oching");
+      return res.json(await buyerCancel(id, user.id, String(req.body?.reason || "")));
+    }
+    if (role !== "admin") throw new HttpError(403, "Ruxsat yo'q");
+    const by = `Admin ${staffName(user)}`;
+    if (action === "admin-cancel" && method === "POST") {
+      const reason = String(req.body?.reason || "").trim().slice(0, 200);
+      if (!reason) throw new HttpError(400, "Sababni yozing");
+      return res.json(orderDetail(id, await cancelOrder(id, { stages: ADMIN_CANCEL_STAGES, reason, by })));
+    }
+    if (action === "reject-cancel" && method === "POST") {
+      await rejectCancel(id, by);
+      return res.json({ ok: true });
+    }
+    if (action === "refunded" && method === "POST") {
+      const ref = ordersCol.doc(id);
+      const o = await db.runTransaction(async (t) => {
+        const order = (await t.get(ref)).data();
+        if (order?.refund?.status !== "pending") throw new HttpError(409, "Qaytariladigan to'lov yo'q");
+        const refund = { ...order.refund, status: "done", doneAt: Date.now(), doneBy: by };
+        t.update(ref, { refund });
+        return { ...order, refund };
+      });
+      if (o.telegramUserId) {
+        await tg("sendMessage", { chat_id: o.telegramUserId, text: `💳 ${ORDER_LABEL(o)}: ${formatSum(o.refund.amount)} kartangizga qaytarildi.` }).catch(() => {});
+      }
+      return res.json(orderDetail(id, o));
+    }
+  }
 
   if (path.startsWith("/api/fulfillment") || path.startsWith("/api/screens")) {
     const handled = await handleFulfillment(req, res, path, method);

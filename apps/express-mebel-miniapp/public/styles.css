@@ -1198,3 +1198,46 @@ select {
 .kit-parts li b {
   white-space: nowrap;
 }
+
+/* ---------- orders ---------- */
+/* Rows without a picture: text column + status chip. */
+.admin-item.text-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.seg--4 {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.seg--4 button {
+  font-size: 13px;
+}
+
+.order-row .chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.order-row small {
+  display: block;
+}
+
+.timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-left: 2px solid var(--teal-soft);
+}
+
+.timeline li {
+  display: grid;
+  gap: 2px;
+  padding: 0 0 10px 14px;
+  font-size: 14px;
+}
+
+.timeline small {
+  color: var(--muted);
+}
