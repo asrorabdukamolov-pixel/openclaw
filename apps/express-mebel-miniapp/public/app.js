@@ -136,10 +136,15 @@ function setupBanners() {
 }
 
 // ---------- catalog ----------
-// Staff load drafts too (for the admin and stock lists); the catalog never shows them.
+// Staff load drafts and kit-only modules too (for the admin and stock lists); the server marks
+// what buyers see as `listed`, so the catalog looks the same for everyone.
+const isKit = (p) => p.kind === "kit";
+// Physical products: what the warehouse counts and labels. Kit availability is computed from them.
+const stocked = () => state.products.filter((p) => !isKit(p));
+
 function visibleProducts() {
   const q = state.query.trim().toLowerCase();
-  const published = state.products.filter((p) => !p.draft);
+  const published = state.products.filter((p) => p.listed);
   if (!q) return published;
   return published.filter((p) => `${p.name} ${p.description} ${p.material}`.toLowerCase().includes(q));
 }
@@ -152,7 +157,7 @@ function cardHtml(p) {
       <img src="${esc(cover(p))}" alt="" loading="lazy" />
       ${p.isNew ? '<span class="badge">Yangi</span>' : ""}
       ${pct ? `<span class="discount">-${pct}%</span>` : ""}
-      ${p.stock > 0 ? `<button class="add ${qty ? "in" : ""}" data-add="${p.id}" aria-label="Savatga">${qty || "+"}</button>` : '<span class="out">Sotuvda yo\'q</span>'}
+      ${p.stock > 0 ? `<button class="add ${qty ? "in" : ""}" data-add="${p.id}" aria-label="Savatga">${qty || "+"}</button>` : `<span class="out">${p.preorderDays ? `~${p.preorderDays} kunda` : "Sotuvda yo'q"}</span>`}
     </div>
     <div class="price-row"><span class="price">${sum(p.price)}</span>${p.oldPrice ? `<span class="old">${sum(p.oldPrice)}</span>` : ""}</div>
     <div class="name">${esc(p.name)}</div>
@@ -289,10 +294,11 @@ function productSheet(id) {
         <dt>Holati</dt><dd>${stockLabel(p)}</dd>
       </dl>
       ${p.description ? `<p class="desc">${esc(p.description)}</p>` : ""}
+      ${isKit(p) ? kitPartsHtml(p) : ""}
       <div class="buy-row">
         ${
           p.stock <= 0
-            ? '<button class="btn" disabled>Sotuvda yo\'q</button>'
+            ? `<button class="btn" disabled>${p.preorderDays ? `Buyurtma asosida · ~${p.preorderDays} kun` : "Sotuvda yo'q"}</button>`
             : qty
               ? `<div class="stepper"><button data-q="-1">−</button><span>${qty}</span><button data-q="1">+</button></div>
                  <button class="btn btn--dark" data-go="cart">Savatga o'tish</button>`
@@ -302,7 +308,7 @@ function productSheet(id) {
       ${
         isStaff()
           ? `<div class="stack" style="margin-top:12px">
-              <button class="btn btn--ghost" data-stock="${p.id}">📦 Ombor: ${p.stock} ta</button>
+              ${isKit(p) ? "" : `<button class="btn btn--ghost" data-stock="${p.id}">📦 Ombor: ${p.stock} ta</button>`}
               ${isAdmin() ? `<button class="btn btn--ghost" data-edit="${p.id}">✏️ Tahrirlash</button>` : ""}
             </div>`
           : ""
@@ -323,8 +329,16 @@ function productSheet(id) {
   };
 }
 
+// Buyers see what is inside a kit; staff also see each module's stock, which limits the kit.
+function kitPartsHtml(p) {
+  const rows = p.parts
+    .map((c) => `<li><span>${esc(c.name)}</span><b>× ${c.qty}</b>${isStaff() ? stockChip(c.stock) : ""}</li>`)
+    .join("");
+  return `<h4 class="sub">Komplekt tarkibi</h4><ul class="kit-parts">${rows}</ul>`;
+}
+
 function stockLabel(p) {
-  if (p.stock <= 0) return "Sotuvda yo'q";
+  if (p.stock <= 0) return p.preorderDays ? `Hozir omborda yo'q · buyurtma asosida ~${p.preorderDays} kun` : "Sotuvda yo'q";
   if (p.stock <= 3) return `Sotuvda bor · faqat ${p.stock} ta qoldi`;
   return "Sotuvda bor";
 }
@@ -595,7 +609,10 @@ function orderTypeSheet(body) {
 function adminSheet(body) {
   const catName = Object.fromEntries(state.categories.map((c) => [c.id, c.name]));
   body.innerHTML = `<h3>Mahsulotlar (${state.products.length})</h3>
-    <button class="btn" data-new style="margin-bottom:10px">＋ Yangi mahsulot qo'shish</button>
+    <div class="row2" style="margin-bottom:10px">
+      <button class="btn" data-new="item">＋ Mahsulot / modul</button>
+      <button class="btn btn--dark" data-new="kit">＋ Komplekt</button>
+    </div>
     <label class="field"><input id="adminSearch" type="search" placeholder="Qidirish" /></label>
     <div id="adminList"></div>`;
   const list = body.querySelector("#adminList");
@@ -605,8 +622,8 @@ function adminSheet(body) {
       .map(
         (p) => `<button class="admin-item" data-edit="${p.id}">
           <img src="${esc(cover(p))}" alt="" />
-          <div><div class="line-name">${esc(p.name)}</div><small>${p.sku ? `SKU ${p.sku} · ` : ""}${sum(p.price)} so'm · omborda ${p.stock} ta</small></div>
-          <span class="chip ${p.draft ? "chip--draft" : ""}">${p.draft ? "Qoralama" : catName[p.category] || p.category}</span>
+          <div><div class="line-name">${esc(p.name)}</div><small>${isKit(p) ? `Komplekt · ${p.parts.length} xil modul` : `SKU ${p.sku ?? "—"}`} · ${sum(p.price)} so'm · ${isKit(p) ? "yig'sa bo'ladi" : "omborda"} ${p.stock} ta</small></div>
+          <span class="chip ${p.draft ? "chip--draft" : ""}">${p.draft ? "Qoralama" : !p.listed ? "Saytda yo'q" : catName[p.category] || p.category}</span>
         </button>`,
       )
       .join("");
@@ -614,7 +631,8 @@ function adminSheet(body) {
   draw();
   body.querySelector("#adminSearch").oninput = (e) => draw(e.target.value);
   body.onclick = (e) => {
-    if (e.target.closest("[data-new]")) openSheet(productForm(null));
+    const add = e.target.closest("[data-new]");
+    if (add) openSheet(productForm(null, add.dataset.new));
     const edit = e.target.closest("[data-edit]");
     if (edit) openSheet(productForm(edit.dataset.edit));
   };
@@ -638,11 +656,37 @@ function resizeImage(file, max = 1200) {
   });
 }
 
-function productForm(id) {
+// The form keeps its kit modules across redraws (the module picker re-renders the list).
+function productForm(id, newKind = "item") {
   const p = id ? byId(id) : null;
+  const kit = p ? isKit(p) : newKind === "kit";
   const images = [...(p?.images || [])].filter((src) => !src.startsWith("/img/"));
+  const parts = (p?.components || []).map((c) => ({ ...c }));
   return (body) => {
-    body.innerHTML = `<h3>${p ? "Mahsulotni tahrirlash" : "Yangi mahsulot"}</h3>
+    const title = p ? (kit ? "Komplektni tahrirlash" : "Mahsulotni tahrirlash") : kit ? "Yangi komplekt" : "Yangi mahsulot / modul";
+    const itemFields = `
+        <label class="field">Qutilar soni (1 dona nechta qutida keladi)<input name="boxes" type="number" inputmode="numeric" min="1" max="20" required value="${p?.boxes ?? 1}" /></label>
+        <label class="check"><input type="checkbox" name="standalone" ${p?.standalone === false ? "" : "checked"} /> Katalogda alohida sotiladi (komplekt moduli bo'lsa, belgini olib tashlang)</label>`;
+    const kitFields = `
+        <div class="field">Komplekt tarkibi (modullar)</div>
+        <div id="kitParts"></div>
+        <div class="row2">
+          <label class="field">Modul<select id="partPick"><option value="">Tanlang…</option>${stocked()
+            .map((m) => `<option value="${m.id}">${esc(m.name)}${m.sku ? ` · SKU ${m.sku}` : ""}</option>`)
+            .join("")}</select></label>
+          <label class="field">Soni<input id="partQty" type="number" inputmode="numeric" min="1" max="50" value="1" /></label>
+        </div>
+        <button class="btn btn--ghost" type="button" data-part-add style="margin-bottom:12px">＋ Modulni qo'shish</button>
+        <div class="row2">
+          <label class="field">Modul yetishmasa
+            <select name="whenShort">
+              <option value="preorder" ${p?.whenShort === "hide" ? "" : "selected"}>"Buyurtma asosida" deb ko'rsatish</option>
+              <option value="hide" ${p?.whenShort === "hide" ? "selected" : ""}>Katalogdan yashirish</option>
+            </select>
+          </label>
+          <label class="field">Tayyorlash muddati (kun)<input name="leadDays" type="number" inputmode="numeric" min="1" max="120" value="${p?.leadDays ?? 10}" /></label>
+        </div>`;
+    body.innerHTML = `<h3>${title}</h3>
       <form id="productForm">
         <div class="field">Rasmlar</div>
         <div class="thumbs" id="thumbs"></div>
@@ -661,14 +705,16 @@ function productForm(id) {
           <label class="field">O'lcham<input name="size" placeholder="120 × 60 × 75 sm" value="${esc(p?.size)}" /></label>
           <label class="field">Material<input name="material" placeholder="LDSP, MDF" value="${esc(p?.material)}" /></label>
         </div>
-        <label class="field">Qutilar soni (1 dona nechta qutida keladi)<input name="boxes" type="number" inputmode="numeric" min="1" max="20" required value="${p?.boxes ?? 1}" /></label>
+        ${kit ? kitFields : itemFields}
         <label class="field">Tavsif<textarea name="description" rows="4">${esc(p?.description)}</textarea></label>
         <label class="check"><input type="checkbox" name="isNew" ${p?.isNew ? "checked" : ""} /> "Yangi" belgisi</label>
         <label class="check"><input type="checkbox" name="published" ${p?.draft ? "" : "checked"} /> Saytda ko'rsatish${p?.draft ? " (ombor qo'shgan qoralama: narx va rasmni kiriting)" : ""}</label>
         ${
-          p
-            ? `<p class="field">Omborda: <b>${p.stock} ta</b>. Qoldiq "📦 Ombor" bo'limida kirim/chiqim orqali o'zgaradi.</p>`
-            : `<label class="field">Boshlang'ich qoldiq (dona)<input name="stock" type="number" inputmode="numeric" min="0" value="0" /></label>`
+          kit
+            ? `<p class="field">Komplektning o'z qoldig'i yo'q: nechta yig'ish mumkinligi modullar qoldig'idan hisoblanadi${p ? ` (hozir: <b>${p.stock} ta</b>)` : ""}.</p>`
+            : p
+              ? `<p class="field">Omborda: <b>${p.stock} ta</b>. Qoldiq "📦 Ombor" bo'limida kirim/chiqim orqali o'zgaradi.</p>`
+              : `<label class="field">Boshlang'ich qoldiq (dona)<input name="stock" type="number" inputmode="numeric" min="0" value="0" /></label>`
         }
         <div class="stack">
           <button class="btn" type="submit">Saqlash</button>
@@ -683,6 +729,20 @@ function productForm(id) {
         '<button type="button" class="thumb-add" data-pick>＋</button>';
     };
     drawThumbs();
+
+    const partsBox = body.querySelector("#kitParts");
+    const drawParts = () => {
+      if (!partsBox) return;
+      partsBox.innerHTML = parts.length
+        ? `<ul class="kit-parts">${parts
+            .map((c, i) => {
+              const m = byId(c.id);
+              return `<li><span>${esc(m?.name ?? "O'chirilgan modul")}</span><b>× ${c.qty}</b><button type="button" class="stock stock--zero" data-part-rm="${i}">✕</button></li>`;
+            })
+            .join("")}</ul><small class="hint" style="display:block;margin:-4px 0 12px">Jami ${parts.reduce((n, c) => n + c.qty * (byId(c.id)?.boxes ?? 1), 0)} quti</small>`
+        : '<p class="empty">Hali modul qo\'shilmagan</p>';
+    };
+    drawParts();
 
     fileInput.onchange = async () => {
       for (const file of fileInput.files) {
@@ -700,6 +760,20 @@ function productForm(id) {
 
     body.onclick = async (e) => {
       if (e.target.closest("[data-pick]")) fileInput.click();
+      if (e.target.closest("[data-part-add]")) {
+        const pickId = body.querySelector("#partPick").value;
+        const qty = Math.max(1, Math.min(50, Number(body.querySelector("#partQty").value) || 1));
+        if (!pickId) return toast("Modulni tanlang");
+        const same = parts.find((c) => c.id === pickId);
+        if (same) same.qty += qty;
+        else parts.push({ id: pickId, qty });
+        drawParts();
+      }
+      const partRm = e.target.closest("[data-part-rm]");
+      if (partRm) {
+        parts.splice(Number(partRm.dataset.partRm), 1);
+        drawParts();
+      }
       const rm = e.target.closest("[data-rm]");
       if (rm) {
         images.splice(Number(rm.dataset.rm), 1);
@@ -723,20 +797,21 @@ function productForm(id) {
     body.querySelector("form").onsubmit = async (e) => {
       e.preventDefault();
       const f = new FormData(e.target);
-      const payload = {
+      const common = {
         name: f.get("name"),
         category: f.get("category"),
         price: Number(f.get("price")),
         oldPrice: f.get("oldPrice") ? Number(f.get("oldPrice")) : null,
         size: f.get("size"),
         material: f.get("material"),
-        boxes: Number(f.get("boxes")),
         description: f.get("description"),
         isNew: f.has("isNew"),
         draft: !f.has("published"),
-        stock: Number(f.get("stock") || 0),
         images,
       };
+      const payload = kit
+        ? { ...common, kind: "kit", components: parts, whenShort: f.get("whenShort"), leadDays: Number(f.get("leadDays")) }
+        : { ...common, kind: "item", boxes: Number(f.get("boxes")), standalone: f.has("standalone"), stock: Number(f.get("stock") || 0) };
       const btn = e.target.querySelector("button[type=submit]");
       btn.disabled = true;
       try {
@@ -1086,11 +1161,12 @@ function movementsHtml(list, withName) {
 }
 
 function warehouseSheet(body) {
-  const empty = state.products.filter((p) => p.stock <= 0).length;
-  const low = state.products.filter((p) => p.stock > 0 && p.stock <= 3).length;
+  const goods = stocked();
+  const empty = goods.filter((p) => p.stock <= 0).length;
+  const low = goods.filter((p) => p.stock > 0 && p.stock <= 3).length;
   body.innerHTML = `<h3>Ombor</h3>
     <div class="stat-row">
-      <div><b>${state.products.reduce((n, p) => n + p.stock, 0)}</b><small>jami dona</small></div>
+      <div><b>${goods.reduce((n, p) => n + p.stock, 0)}</b><small>jami dona</small></div>
       <div><b>${low}</b><small>kam qolgan</small></div>
       <div><b>${empty}</b><small>tugagan</small></div>
     </div>
@@ -1100,7 +1176,7 @@ function warehouseSheet(body) {
     <div id="stockLog"><p class="empty">Yuklanmoqda…</p></div>`;
   const list = body.querySelector("#stockList");
   const draw = (q = "") => {
-    list.innerHTML = [...state.products]
+    list.innerHTML = goods
       .filter((p) => p.name.toLowerCase().includes(q.toLowerCase()))
       .sort((a, b) => a.stock - b.stock)
       .map(

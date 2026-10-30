@@ -94,7 +94,8 @@ let seen = null;
 let openId = null;
 
 function cardHtml(o) {
-  const items = o.items.map((i) => `<li>${esc(i.name)} × ${i.qty}</li>`).join("");
+  // The card shows what the buyer ordered (a kit is one line); picking lists its modules.
+  const items = o.lines.map((i) => `<li>${esc(i.name)} × ${i.qty}${i.kind === "kit" ? " <small>komplekt</small>" : ""}</li>`).join("");
   const chips = [
     o.orderType === "pickup" ? "🏬 Olib ketish" : "🚚 Yetkazish",
     o.payment === "card" ? '<span class="chip chip--paid">💳 To\'langan</span>' : "💵 Naqd",
@@ -261,7 +262,9 @@ let products = [];
 
 function renderLabels() {
   const q = $("#labelSearch").value.trim().toLowerCase();
+  // Kits have no boxes of their own: their modules carry the labels.
   $("#labelList").innerHTML = products
+    .filter((p) => p.kind !== "kit")
     .filter((p) => !q || p.name.toLowerCase().includes(q) || String(p.sku).includes(q))
     .map(
       (p) => `<div class="label-row">

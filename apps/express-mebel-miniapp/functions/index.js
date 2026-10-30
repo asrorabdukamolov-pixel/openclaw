@@ -99,7 +99,29 @@ async function saveImage(dataUrl) {
 
 // ---------- validation ----------
 
+const KIT_SHORT = new Set(["preorder", "hide"]);
+const MAX_KIT_PARTS = 40;
+
+// Kits ("komplekt") are what the catalog sells as one product, e.g. a kitchen of a dozen modules.
+// They hold no stock or barcode of their own: availability comes from the modules (`components`),
+// which are ordinary products with a SKU and boxes. Components are checked against the database by
+// the route that saves the kit (`checkKitParts`).
+function cleanKitParts(raw) {
+  const qtyById = new Map();
+  for (const c of Array.isArray(raw) ? raw : []) {
+    const id = String(c?.id || "");
+    const qty = Math.round(Number(c?.qty));
+    if (!/^[\w-]{1,64}$/.test(id) || !(qty >= 1 && qty <= 50)) throw new HttpError(400, "Komplekt tarkibi noto'g'ri");
+    qtyById.set(id, (qtyById.get(id) || 0) + qty);
+  }
+  if (!qtyById.size) throw new HttpError(400, "Komplektga kamida bitta modul qo'shing");
+  if (qtyById.size > MAX_KIT_PARTS) throw new HttpError(400, `Komplektda ${MAX_KIT_PARTS} xildan ko'p modul bo'lmasin`);
+  return [...qtyById].map(([id, qty]) => ({ id, qty }));
+}
+
 function cleanProduct(input, existing = {}) {
+  // The kind is chosen once, at creation; products saved before kits existed are items.
+  const kind = existing.createdAt ? (existing.kind ?? "item") : input.kind === "kit" ? "kit" : "item";
   const name = String(input.name ?? existing.name ?? "").trim();
   const category = String(input.category ?? existing.category ?? "");
   // A draft is a product the warehouse registered; it stays off the catalog until an admin prices
@@ -117,7 +139,7 @@ function cleanProduct(input, existing = {}) {
   const images = Array.isArray(input.images ?? existing.images)
     ? (input.images ?? existing.images).map(String).filter(isOwnImage).slice(0, 8)
     : [];
-  return {
+  const common = {
     name: name.slice(0, 120),
     category,
     price,
@@ -127,14 +149,31 @@ function cleanProduct(input, existing = {}) {
     material: String(input.material ?? existing.material ?? "").slice(0, 120),
     isNew: Boolean(input.isNew ?? existing.isNew),
     draft,
+    images,
+    createdAt: existing.createdAt || Date.now(),
+    updatedAt: Date.now(),
+  };
+  if (kind === "kit") {
+    const whenShort = String(input.whenShort ?? existing.whenShort ?? "preorder");
+    if (!KIT_SHORT.has(whenShort)) throw new HttpError(400, "Modul yetishmaganda nima qilish noto'g'ri");
+    return {
+      ...common,
+      kind,
+      components: cleanKitParts(input.components ?? existing.components),
+      whenShort,
+      leadDays: Math.min(120, Math.max(1, Math.round(Number(input.leadDays ?? existing.leadDays ?? 10)) || 10)),
+    };
+  }
+  return {
+    ...common,
+    kind,
+    // Modules that only make sense inside a kit stay off the catalog but keep their stock and labels.
+    standalone: Boolean(input.standalone ?? existing.standalone ?? true),
     // Packages per unit: each box gets its own barcode label and is scanned when picking.
     boxes: Math.min(20, Math.max(1, Math.round(Number(input.boxes ?? existing.boxes ?? 1)) || 1)),
     sku: existing.sku ?? null,
     // Stock changes only through the warehouse journal; new products start at 0.
     stock: existing.stock ?? 0,
-    images,
-    createdAt: existing.createdAt || Date.now(),
-    updatedAt: Date.now(),
   };
 }
 
@@ -316,12 +355,48 @@ function reverseGeocode(lat, lon) {
 
 // ---------- routes ----------
 
-async function listProducts({ withDrafts = false } = {}) {
+// A kit's availability is its scarcest module: floor(module stock / modules per kit).
+function withKitStock(kit, byId) {
+  const parts = kit.components.map((c) => ({ ...c, product: byId.get(c.id) }));
+  const missing = parts.some((c) => !c.product);
+  const stock = missing ? 0 : Math.min(...parts.map((c) => Math.floor(c.product.stock / c.qty)));
+  return {
+    ...kit,
+    stock,
+    boxes: missing ? null : parts.reduce((n, c) => n + c.qty * (c.product.boxes ?? 1), 0),
+    parts: parts.map((c) => ({
+      id: c.id,
+      qty: c.qty,
+      name: c.product?.name ?? "O'chirilgan modul",
+      sku: c.product?.sku ?? null,
+      boxes: c.product?.boxes ?? null,
+      stock: c.product?.stock ?? 0,
+    })),
+    preorderDays: stock <= 0 && kit.whenShort === "preorder" ? kit.leadDays : null,
+  };
+}
+
+// `listed` = shown to buyers. Staff get everything (drafts, kit-only modules) with the same flag,
+// so the mini app filters its catalog the way the server filters for buyers.
+async function listProducts({ staff = false } = {}) {
   const snap = await productsCol.get();
-  return snap.docs
-    .map((d) => ({ id: d.id, ...d.data() }))
-    .filter((p) => withDrafts || !p.draft)
+  const raw = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  const byId = new Map(raw.filter((p) => p.kind !== "kit").map((p) => [p.id, p]));
+  return raw
+    .map((p) => (p.kind === "kit" ? withKitStock(p, byId) : p))
+    .map((p) => ({
+      ...p,
+      listed: !p.draft && (p.kind === "kit" ? p.stock > 0 || p.whenShort === "preorder" : p.standalone !== false),
+    }))
+    .filter((p) => staff || p.listed)
     .sort((a, b) => b.createdAt - a.createdAt);
+}
+
+// Kit modules must exist and be ordinary products (a kit inside a kit would hide its boxes).
+async function checkKitParts(t, components) {
+  const snaps = await t.getAll(...components.map((c) => productsCol.doc(c.id)));
+  const bad = snaps.find((s) => !s.exists || s.data().kind === "kit");
+  if (bad) throw new HttpError(400, bad.exists ? `«${bad.data().name}» komplekt, uni modul qilib bo'lmaydi` : "Komplektdagi modul topilmadi");
 }
 
 // Staff (admin, omborchi) and paired warehouse screens see drafts; buyers never do.
@@ -446,7 +521,7 @@ const FIRST_ORDER_NO = 1000;
 async function assignMissingSkus() {
   await db.runTransaction(async (t) => {
     const counters = (await t.get(countersRef)).data() || {};
-    const missing = (await t.get(productsCol)).docs.filter((d) => d.data().sku == null);
+    const missing = (await t.get(productsCol)).docs.filter((d) => d.data().sku == null && d.data().kind !== "kit");
     if (!missing.length) return;
     let sku = counters.sku ?? FIRST_SKU;
     missing.sort((a, b) => a.data().createdAt - b.data().createdAt);
@@ -486,30 +561,34 @@ async function handleOrder(req, res) {
     const snaps = await t.getAll(...refs);
     const lines = snaps
       .map((snap, i) => ({ ref: refs[i], product: snap.exists ? snap.data() : null, qty: wanted[i].qty }))
-      .filter((l) => l.product && !l.product.draft);
+      .filter((l) => l.product && !l.product.draft && l.product.standalone !== false);
     if (!lines.length) throw new HttpError(400, "Savat bo'sh");
-    const short = lines.find((l) => l.qty > l.product.stock);
+    const pick = await pickPlan(t, lines);
+    const short = pick.find((m) => m.qty > m.product.stock);
     if (short) {
+      const left = short.product.stock ? `omborda faqat ${short.product.stock} ta qoldi` : "tugadi";
       throw new HttpError(
         409,
-        short.product.stock
-          ? `«${short.product.name}» omborda faqat ${short.product.stock} ta qoldi`
-          : `«${short.product.name}» tugadi`,
+        short.kits.length
+          ? `«${short.kits.join("», «")}» shuncha miqdorda yo'q: «${short.product.name}» moduli ${left}`
+          : `«${short.product.name}» ${left}`,
       );
     }
-    for (const l of lines) moveStock(t, l.ref, l.product, "sale", l.qty, "Buyurtma", buyer);
+    for (const m of pick) moveStock(t, m.ref, m.product, "sale", m.qty, m.kits.length ? `Buyurtma: ${m.kits.join(", ")}` : "Buyurtma", buyer);
     const data = {
       number: (counters.order ?? FIRST_ORDER_NO) + 1,
+      // What the buyer bought (kits stay one line) ...
       items: lines.map((l) => ({
         id: l.ref.id,
         name: l.product.name,
         price: l.product.price,
         qty: l.qty,
-        sku: l.product.sku ?? null,
-        boxes: l.product.boxes ?? 1,
+        kind: l.product.kind === "kit" ? "kit" : "item",
       })),
+      // ... and what the warehouse picks: physical modules with their boxes, kits expanded and merged.
+      pick: pick.map((m) => ({ id: m.ref.id, name: m.product.name, qty: m.qty, sku: m.product.sku ?? null, boxes: m.product.boxes ?? 1 })),
       total: lines.reduce((n, l) => n + l.product.price * l.qty, 0),
-      lowStock: lines.filter((l) => l.product.stock <= 3).map((l) => ({ name: l.product.name, stock: l.product.stock })),
+      lowStock: pick.filter((m) => m.product.stock <= 3).map((m) => ({ name: m.product.name, stock: m.product.stock })),
       orderType: body.orderType === "pickup" ? "pickup" : "delivery",
       payment,
       status: payment === "card" ? "awaiting_payment" : "new",
@@ -551,6 +630,37 @@ async function handleOrder(req, res) {
   }
 }
 
+// Physical modules an order needs: kits expanded into their components, the same module merged
+// across lines so its stock is checked once. Reads only, so it runs before the transaction writes.
+async function pickPlan(t, lines) {
+  const kitParts = lines.filter((l) => l.product.kind === "kit").flatMap((l) => l.product.components);
+  const partIds = [...new Set(kitParts.map((c) => c.id))];
+  const partSnaps = partIds.length ? await t.getAll(...partIds.map((id) => productsCol.doc(id))) : [];
+  const parts = new Map(partSnaps.filter((s) => s.exists).map((s) => [s.id, s.data()]));
+  const plan = new Map();
+  const add = (ref, product, qty, kitName) => {
+    const m = plan.get(ref.id) || { ref, product, qty: 0, kits: [] };
+    m.qty += qty;
+    if (kitName && !m.kits.includes(kitName)) m.kits.push(kitName);
+    plan.set(ref.id, m);
+  };
+  for (const l of lines) {
+    if (l.product.kind !== "kit") {
+      add(l.ref, l.product, l.qty);
+      continue;
+    }
+    for (const c of l.product.components) {
+      const product = parts.get(c.id);
+      if (!product) throw new HttpError(409, `«${l.product.name}» tarkibidagi modul topilmadi, admin bilan bog'laning`);
+      add(productsCol.doc(c.id), product, c.qty * l.qty, l.product.name);
+    }
+  }
+  return [...plan.values()];
+}
+
+// Orders placed before kits existed have no `pick`; their items were the physical products.
+const pickLines = (order) => order.pick ?? order.items;
+
 // Returns reserved stock of an unpaid order and marks it cancelled. Only orders whose status is in
 // `fromStatuses` are touched, so a paid order can never be released.
 async function releaseOrder(orderId, fromStatuses, reason) {
@@ -559,10 +669,11 @@ async function releaseOrder(orderId, fromStatuses, reason) {
     const snap = await t.get(ref);
     if (!snap.exists || !fromStatuses.includes(snap.data().status)) return false;
     const order = snap.data();
-    const refs = order.items.map((i) => productsCol.doc(i.id));
+    const lines = pickLines(order);
+    const refs = lines.map((i) => productsCol.doc(i.id));
     const products = await t.getAll(...refs);
     products.forEach((p, i) => {
-      if (p.exists) moveStock(t, refs[i], p.data(), "release", order.items[i].qty, reason, "Tizim");
+      if (p.exists) moveStock(t, refs[i], p.data(), "release", lines[i].qty, reason, "Tizim");
     });
     t.update(ref, { status: "cancelled", cancelledAt: Date.now(), cancelReason: reason });
     return true;
@@ -690,7 +801,7 @@ async function handleSuccessfulPayment(msg) {
 const ACTIVE_STAGES = ["new", "picking", "ready", "shipped"];
 const AUTO_CLOSE_MS = 5 * 24 * 60 * 60 * 1000;
 const boxCode = (sku, box) => `EM${sku}-${box}`;
-const boxesNeeded = (order) => order.items.reduce((n, i) => n + i.qty * (i.boxes ?? 1), 0);
+const boxesNeeded = (order) => pickLines(order).reduce((n, i) => n + i.qty * (i.boxes ?? 1), 0);
 const boxesPicked = (order) => Object.values(order.picked || {}).reduce((n, c) => n + c, 0);
 
 // Screens are browser pages paired once with a code from the admin panel; they hold a long token
@@ -725,7 +836,8 @@ function fulfillmentView(id, o) {
     phone: o.phone,
     address: o.address,
     comment: o.comment,
-    items: o.items.map((i) => ({ name: i.name, qty: i.qty, sku: i.sku, boxes: i.boxes ?? 1 })),
+    lines: o.items.map((i) => ({ name: i.name, qty: i.qty, kind: i.kind ?? "item" })),
+    items: pickLines(o).map((i) => ({ name: i.name, qty: i.qty, sku: i.sku, boxes: i.boxes ?? 1 })),
     picked: o.picked || {},
     boxesNeeded: boxesNeeded(o),
     boxesPicked: boxesPicked(o),
@@ -788,22 +900,23 @@ async function pickBox(id, body, actor) {
     if (!snap.exists) throw new HttpError(404, "Buyurtma topilmadi");
     const o = snap.data();
     if (o.stage !== "picking") throw new HttpError(409, "Avval yig'ishni boshlang");
+    const items = pickLines(o);
     let index;
     let box;
     const scanned = /^EM(\d{4,9})-(\d{1,2})$/i.exec(String(body.code || "").trim());
     if (scanned) {
       const sku = Number(scanned[1]);
       box = Number(scanned[2]);
-      index = o.items.findIndex((i) => i.sku === sku);
+      index = items.findIndex((i) => i.sku === sku);
       if (index === -1) throw new HttpError(409, "Bu mahsulot shu buyurtmada yo'q");
     } else if (body.code) {
       throw new HttpError(400, "Shtrix-kod tanilmadi");
     } else {
       index = Number(body.item);
       box = Number(body.box);
-      if (!o.items[index]) throw new HttpError(400, "Mahsulot noto'g'ri");
+      if (!items[index]) throw new HttpError(400, "Mahsulot noto'g'ri");
     }
-    const item = o.items[index];
+    const item = items[index];
     if (!(box >= 1 && box <= (item.boxes ?? 1))) throw new HttpError(409, `Bu mahsulotda ${item.boxes ?? 1} ta quti bor`);
     const key = `${index}-${box}`;
     const count = (o.picked || {})[key] || 0;
@@ -980,15 +1093,15 @@ async function route(req, res) {
   }
 
   if (path === "/api/products" && method === "GET") {
-    const withDrafts = req.query.all === "1" && (await isStaffRequest(req));
-    return res.json(await listProducts({ withDrafts }));
+    const staff = req.query.all === "1" && (await isStaffRequest(req));
+    return res.json(await listProducts({ staff }));
   }
 
   if (path === "/api/products/draft" && method === "POST") {
     const { actor } = await requireFulfillment(req);
     const ref = productsCol.doc();
     const body = req.body || {};
-    const product = cleanProduct({ ...body, draft: true, price: 0, oldPrice: null, isNew: false, images: [] });
+    const product = cleanProduct({ ...body, kind: "item", draft: true, price: 0, oldPrice: null, isNew: false, images: [] });
     await db.runTransaction(async (t) => {
       const counters = (await t.get(countersRef)).data() || {};
       product.sku = (counters.sku ?? FIRST_SKU) + 1;
@@ -1017,6 +1130,11 @@ async function route(req, res) {
     const product = cleanProduct(body);
     const initial = Math.min(Math.floor(Number(body.stock)) || 0, 100000);
     await db.runTransaction(async (t) => {
+      if (product.kind === "kit") {
+        await checkKitParts(t, product.components);
+        t.set(ref, product);
+        return;
+      }
       const counters = (await t.get(countersRef)).data() || {};
       product.sku = (counters.sku ?? FIRST_SKU) + 1;
       t.set(countersRef, { sku: product.sku }, { merge: true });
@@ -1040,6 +1158,7 @@ async function route(req, res) {
         const snap = await t.get(ref);
         if (!snap.exists) throw new HttpError(404, "Mahsulot topilmadi");
         const next = cleanProduct(req.body || {}, snap.data());
+        if (next.kind === "kit") await checkKitParts(t, next.components);
         // update, not set: keeps fields the form does not own (createdBy of warehouse drafts).
         t.update(ref, next);
         return next;
@@ -1047,7 +1166,12 @@ async function route(req, res) {
       return res.json({ id: ref.id, ...product });
     }
     if (method === "DELETE") {
-      await ref.delete();
+      await db.runTransaction(async (t) => {
+        const kits = await t.get(productsCol.where("kind", "==", "kit"));
+        const usedIn = kits.docs.filter((d) => d.data().components.some((c) => c.id === ref.id)).map((d) => d.data().name);
+        if (usedIn.length) throw new HttpError(409, `Bu modul komplektlarda bor: «${usedIn.join("», «")}». Avval komplektdan olib tashlang`);
+        t.delete(ref);
+      });
       return res.json({ ok: true });
     }
   }
@@ -1150,6 +1274,7 @@ async function route(req, res) {
       const snap = await t.get(ref);
       if (!snap.exists) throw new HttpError(404, "Mahsulot topilmadi");
       const product = snap.data();
+      if (product.kind === "kit") throw new HttpError(400, "Komplekt qoldig'i modullaridan hisoblanadi: modullarni kirim qiling");
       if (body.type === "out" && qty > product.stock) throw new HttpError(400, `Omborda faqat ${product.stock} ta bor`);
       const movement = moveStock(t, ref, product, body.type, qty, body.note, staffName(user));
       return { product: { id: ref.id, ...product }, movement };

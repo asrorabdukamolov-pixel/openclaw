@@ -1172,3 +1172,29 @@ select {
   background: #fff4e0;
   color: #9a5b00;
 }
+
+/* ---------- kit modules ---------- */
+.kit-parts {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  border-top: 1px solid var(--line);
+}
+
+.kit-parts li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+}
+
+.kit-parts li span:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.kit-parts li b {
+  white-space: nowrap;
+}

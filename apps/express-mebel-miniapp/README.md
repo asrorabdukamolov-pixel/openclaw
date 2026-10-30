@@ -22,6 +22,7 @@ Shriftlar: **Prompt Italic** (sarlavhalar) va **Montserrat** (matn). Bo'limlar: 
 - Buyurtma admin chatiga xarita havolalari va lokatsiya pini bilan keladi, mijozga tasdiq xabari boradi. Buyurtmalar Firestore `orders` kolleksiyasida ham saqlanadi.
 - **Ombor**: qoldiq, kirim / chiqim, harakatlar tarixi. Buyurtmada qoldiq tranzaksiyada kamayadi; 0 bo'lsa mahsulot sotuvdan chiqadi.
 - **Admin panel**: mahsulot qo'shish / tahrirlash / o'chirish, telefondan rasm yuklash.
+- **Komplektlar**: bir nechta moduldan yig'ilgan mahsulot (masalan, oshxona); mavjud soni modullar qoldig'idan hisoblanadi.
 - **Bannerlar va aksiyalar** (☰ → 🖼): bosh sahifadagi aylanuvchi bannerlar. Ko'rinish: *Rasm* (butun banner — rasm, 2:1, masalan 1200×600),
   *Qora* yoki *Moviy* (brend rangidagi matnli karta + yon rasm). Bosilganda bo'lim yoki mahsulotni ochadi.
   Tartib raqami, "Saytda ko'rsatish" belgisi (yashirilgan banner o'chmaydi, keyin qayta yoqiladi).
@@ -142,6 +143,20 @@ Admin va omborchilar ham shu amallarni Telegram orqali bajarishi mumkin (API bir
 Bu versiyani yuklagandan keyin `/api/setup` ni **qayta oching**: mavjud mahsulotlarga SKU beriladi va bot
 "Qabul qildim" tugmalarini qabul qiladigan bo'ladi.
 
+## Komplektlar (oshxona va boshqa yig'ma mahsulotlar)
+
+Mahsulot uch darajada: **quti** (shtrix-kod `EM<SKU>-<quti>`) → **modul / mahsulot** (SKU, qoldiq shu yerda) → **komplekt**
+(katalogda sotiladi, o'z qoldig'i va shtrix-kodi yo'q).
+
+1. Avval modullarni qo'shing: ☰ → ⚙️ → **＋ Mahsulot / modul**. Faqat komplekt ichida sotiladigan modulda
+   **"Katalogda alohida sotiladi"** belgisini olib tashlang: u katalogda chiqmaydi, lekin omborda, etiketkada va skanerda bor.
+2. ☰ → ⚙️ → **＋ Komplekt**: nom, narx, rasm, so'ng modullarni tanlab sonini yozing (masalan, pastki shkaf 60 × 2).
+3. **Modul yetishmasa**: "Buyurtma asosida" (katalogda "~N kunda" deb turadi, savatga qo'shilmaydi) yoki "Katalogdan yashirish".
+
+- Komplekt mavjud soni = eng kam yetadigan modul: `qoldiq ÷ komplektdagi soni`, eng kichigi.
+- Buyurtmada har bir modul band qilinadi; ombor ekranida karta komplekt nomini, terish oynasi esa barcha modul va qutilarni ko'rsatadi.
+- Komplektga qo'lda kirim/chiqim qilinmaydi (modullarni kirim qiling); komplektda turgan modulni o'chirib bo'lmaydi.
+
 ## Omborchini qo'shish
 
 1. Admin: ☰ → **👥 Xodimlar** → **＋ Omborchini taklif qilish** → **📤 Yuborish** (yoki nusxalab, omborchiga jo'nating).
@@ -177,7 +192,7 @@ Hammasi `https://<ID>.web.app/api/...` ostida (Hosting → `api` funksiyasi, `eu
 | POST | `/api/telegram` | faqat Telegram (`X-Telegram-Bot-Api-Secret-Token`) |
 | GET | `/api/config` | hamma |
 | GET | `/api/products`, `/api/products/:id` | hamma |
-| POST | `/api/products` | admin |
+| POST | `/api/products` | admin (komplekt: `{ kind: "kit", components: [{ id, qty }], whenShort: "preorder" \| "hide", leadDays }`) |
 | PUT / DELETE | `/api/products/:id` | admin |
 | POST | `/api/upload` | admin (`{ dataUrl }` → Storage `images/`) |
 | GET | `/api/banners` | hamma (faol bannerlar); `?all=1` — admin uchun yashirinlari bilan |
@@ -191,7 +206,7 @@ Hammasi `https://<ID>.web.app/api/...` ostida (Hosting → `api` funksiyasi, `eu
 | POST | `/api/screens/pair-code` | admin (`{ name }` → 8 belgili kod) |
 | POST | `/api/screens/pair` | hamma (`{ code }` → ekran tokeni) |
 | GET / DELETE | `/api/screens`, `/api/screens/:id` | admin |
-| GET | `/api/products?all=1` | ekran tokeni, admin, omborchi (qoralamalar bilan) |
+| GET | `/api/products?all=1` | ekran tokeni, admin, omborchi (qoralamalar va alohida sotilmaydigan modullar bilan; `listed` = katalogda) |
 | POST | `/api/products/draft` | ekran tokeni, admin, omborchi (`{ name, category, boxes, size, material }`) |
 | POST | `/api/stock/scan` | ekran tokeni, admin, omborchi (`{ type: "in" \| "out", note, scans: { "EM100013-1": 2, … } }`) |
 | GET | `/api/fulfillment` | ekran tokeni, admin, omborchi |
