@@ -143,6 +143,17 @@ Admin va omborchilar ham shu amallarni Telegram orqali bajarishi mumkin (API bir
 Bu versiyani yuklagandan keyin `/api/setup` ni **qayta oching**: mavjud mahsulotlarga SKU beriladi va bot
 "Qabul qildim" tugmalarini qabul qiladigan bo'ladi.
 
+## Yetkazish vaqtini tanlash
+
+Yetkaziladigan buyurtma ombordan **Tayyor** bo'lganda mijozga bot xabar yuboradi: "Qachon yetkazib beraylik?" va
+eng yaqin bo'sh 4 ta vaqt (ertadan boshlab, yakshanbasiz; 10:00–13:00 va 14:00–18:00) + **📞 Boshqa kun kerak**.
+
+- Bir vaqtga ko'pi bilan 4 ta buyurtma (`SLOT_CAPACITY`, `functions/index.js`); to'lgan vaqt taklif qilinmaydi,
+  eski tugma bosilsa yangi bo'sh vaqtlar yuboriladi.
+- Tanlangan vaqt buyurtmalar guruhiga yoziladi va ombor ekranidagi kartada 🗓 bilan ko'rinadi.
+- 3 soatda tanlanmasa mijozga eslatma, 24 soatda tanlanmasa guruhga "qo'ng'iroq qiling" (`remindSlots`, har soatda).
+- "Boshqa kun" bosilsa, guruhga mijozning ismi va telefoni bilan xabar boradi.
+
 ## Komplektlar (oshxona va boshqa yig'ma mahsulotlar)
 
 Mahsulot uch darajada: **quti** (shtrix-kod `EM<SKU>-<quti>`) → **modul / mahsulot** (SKU, qoldiq shu yerda) → **komplekt**

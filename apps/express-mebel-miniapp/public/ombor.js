@@ -93,6 +93,13 @@ let orders = [];
 let seen = null;
 let openId = null;
 
+// Delivery window the buyer picked in the bot once the order was ready.
+function slotChip(o) {
+  if (o.orderType !== "delivery" || (o.stage !== "ready" && o.stage !== "shipped")) return "";
+  if (o.deliveryLabel) return `🗓 ${esc(o.deliveryLabel)}`;
+  return o.slotOther ? "📞 Boshqa kun: operator kelishadi" : "⏳ Mijoz vaqt tanlamagan";
+}
+
 function cardHtml(o) {
   // The card shows what the buyer ordered (a kit is one line); picking lists its modules.
   const items = o.lines.map((i) => `<li>${esc(i.name)} × ${i.qty}${i.kind === "kit" ? " <small>komplekt</small>" : ""}</li>`).join("");
@@ -100,7 +107,9 @@ function cardHtml(o) {
     o.orderType === "pickup" ? "🏬 Olib ketish" : "🚚 Yetkazish",
     o.payment === "card" ? '<span class="chip chip--paid">💳 To\'langan</span>' : "💵 Naqd",
     `${o.boxesNeeded} quti`,
+    slotChip(o),
   ]
+    .filter(Boolean)
     .map((c) => (c.startsWith("<span") ? c : `<span class="chip">${c}</span>`))
     .join("");
   const pct = Math.round((o.boxesPicked / o.boxesNeeded) * 100);

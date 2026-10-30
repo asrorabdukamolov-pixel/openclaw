@@ -323,6 +323,8 @@ function getBotUsername() {
 // Telegram echoes this in X-Telegram-Bot-Api-Secret-Token so only Telegram can call the webhook.
 const webhookSecret = () => createHmac("sha256", BOT_TOKEN.value()).update("webhook").digest("hex");
 
+const ordersChat = () => idList(ORDERS_CHAT_ID.value())[0] || idList(ADMIN_IDS.value())[0];
+
 const escapeHtml = (s) =>
   String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
 const formatSum = (n) => `${Math.round(n).toLocaleString("ru-RU").replace(/\s/g, " ")} so'm`;
@@ -712,11 +714,11 @@ async function notifyOrder(order) {
     .join("\n");
 
   // The order is already committed; notification failures are logged, not surfaced to the buyer.
-  const ordersChat = idList(ORDERS_CHAT_ID.value())[0] || idList(ADMIN_IDS.value())[0];
+  const chat = ordersChat();
   try {
-    if (ordersChat) {
+    if (chat) {
       const sent = await tg("sendMessage", {
-        chat_id: ordersChat,
+        chat_id: chat,
         text,
         parse_mode: "HTML",
         link_preview_options: { is_disabled: true },
@@ -724,7 +726,7 @@ async function notifyOrder(order) {
       // A native location pin lets the courier open navigation straight from the chat.
       if (location) {
         await tg("sendLocation", {
-          chat_id: ordersChat,
+          chat_id: chat,
           latitude: location.lat,
           longitude: location.lon,
           reply_parameters: { message_id: sent.message_id },
@@ -789,9 +791,8 @@ async function handleSuccessfulPayment(msg) {
   });
   if (!result || result.duplicate) return;
   if (result.order.status === "paid") return notifyOrder(result.order);
-  const ordersChat = idList(ORDERS_CHAT_ID.value())[0] || idList(ADMIN_IDS.value())[0];
   await tg("sendMessage", {
-    chat_id: ordersChat,
+    chat_id: ordersChat(),
     text: `⚠️ To'lov bron bekor qilingandan keyin keldi: buyurtma ${ref.id}, ${formatSum(result.order.total)}. Omborni tekshirib, mijoz bilan bog'laning.`,
   });
 }
@@ -836,6 +837,8 @@ function fulfillmentView(id, o) {
     phone: o.phone,
     address: o.address,
     comment: o.comment,
+    deliveryLabel: o.deliveryLabel ?? null,
+    slotOther: Boolean(o.slotOther),
     lines: o.items.map((i) => ({ name: i.name, qty: i.qty, kind: i.kind ?? "item" })),
     items: pickLines(o).map((i) => ({ name: i.name, qty: i.qty, sku: i.sku, boxes: i.boxes ?? 1 })),
     picked: o.picked || {},
@@ -846,16 +849,124 @@ function fulfillmentView(id, o) {
 
 const ORDER_LABEL = (o) => (o.number ? `#${o.number}` : "");
 
+// ---------- delivery slots ----------
+// When a delivery order is ready the buyer picks a window from the bot. A slot key is
+// "<YYYY-MM-DD>_<start hour>" in Tashkent time (UTC+5 all year, no DST).
+const TZ_OFFSET_MS = 5 * 60 * 60 * 1000;
+const DELIVERY_WINDOWS = [
+  { from: 10, to: 13 },
+  { from: 14, to: 18 },
+];
+// Orders one window can take: one vehicle run. Raise it when more vehicles drive.
+const SLOT_CAPACITY = 4;
+const SLOT_DAYS_AHEAD = 10;
+const SLOTS_OFFERED = 4;
+const SLOT_REMIND_MS = 3 * 60 * 60 * 1000;
+const SLOT_ESCALATE_MS = 24 * 60 * 60 * 1000;
+const MONTHS = ["yanvar", "fevral", "mart", "aprel", "may", "iyun", "iyul", "avgust", "sentabr", "oktabr", "noyabr", "dekabr"];
+const WEEKDAYS = ["yakshanba", "dushanba", "seshanba", "chorshanba", "payshanba", "juma", "shanba"];
+const SUNDAY = 0;
+
+const tashkentDay = (ms) => new Date(ms + TZ_OFFSET_MS).toISOString().slice(0, 10);
+const hh = (h) => `${String(h).padStart(2, "0")}:00`;
+
+// Valid keys only: a known window on a working day from tomorrow up to SLOT_DAYS_AHEAD.
+function parseSlot(key) {
+  const m = /^(\d{4}-\d{2}-\d{2})_(\d{1,2})$/.exec(String(key));
+  const window = m && DELIVERY_WINDOWS.find((w) => w.from === Number(m[2]));
+  if (!window) return null;
+  const date = new Date(`${m[1]}T00:00:00Z`);
+  const days = (date - new Date(`${tashkentDay(Date.now())}T00:00:00Z`)) / 864e5;
+  if (!(days >= 1 && days <= SLOT_DAYS_AHEAD) || date.getUTCDay() === SUNDAY) return null;
+  const label = `${date.getUTCDate()}-${MONTHS[date.getUTCMonth()]}, ${WEEKDAYS[date.getUTCDay()]}, ${hh(window.from)}–${hh(window.to)}`;
+  return { key: m[0], label, short: `${date.getUTCDate()}-${MONTHS[date.getUTCMonth()].slice(0, 3)} ${hh(window.from)}–${hh(window.to)}` };
+}
+
+function upcomingSlots() {
+  const today = new Date(`${tashkentDay(Date.now())}T00:00:00Z`).getTime();
+  const keys = [];
+  for (let d = 1; d <= SLOT_DAYS_AHEAD; d++) {
+    const day = new Date(today + d * 864e5).toISOString().slice(0, 10);
+    for (const w of DELIVERY_WINDOWS) keys.push(`${day}_${w.from}`);
+  }
+  return keys.map(parseSlot).filter(Boolean);
+}
+
+// The first windows with room left, earliest first.
+async function openSlots() {
+  const slots = upcomingSlots();
+  const taken = await ordersCol.where("deliverySlot", "in", slots.map((s) => s.key)).get();
+  const count = {};
+  for (const d of taken.docs) count[d.data().deliverySlot] = (count[d.data().deliverySlot] || 0) + 1;
+  return slots.filter((s) => (count[s.key] || 0) < SLOT_CAPACITY).slice(0, SLOTS_OFFERED);
+}
+
+async function slotKeyboard(id) {
+  const slots = await openSlots();
+  const rows = [];
+  for (let i = 0; i < slots.length; i += 2) {
+    rows.push(slots.slice(i, i + 2).map((s) => ({ text: s.short, callback_data: `slot:${id}:${s.key}` })));
+  }
+  rows.push([{ text: "📞 Boshqa kun kerak", callback_data: `slot:${id}:other` }]);
+  return { inline_keyboard: rows };
+}
+
+// Books a window inside a transaction so a full window cannot be overbooked by two buyers at once.
+async function bookSlot(id, key, buyerId) {
+  const slot = parseSlot(key);
+  if (!slot) return { error: "Bu vaqt endi mavjud emas, yangisini tanlang", retry: true };
+  const ref = ordersCol.doc(id);
+  return db.runTransaction(async (t) => {
+    const snap = await t.get(ref);
+    const o = snap.data();
+    if (!snap.exists || o.telegramUserId !== buyerId) return { error: "Buyurtma topilmadi" };
+    if (o.stage !== "ready" || o.orderType !== "delivery") return { error: "Bu buyurtma uchun vaqt tanlab bo'lmaydi", closed: true };
+    const taken = await t.get(ordersCol.where("deliverySlot", "==", slot.key));
+    const others = taken.docs.filter((d) => d.id !== id).length;
+    if (others >= SLOT_CAPACITY) return { error: "Bu vaqt band bo'lib qoldi, boshqasini tanlang", retry: true };
+    t.update(ref, { deliverySlot: slot.key, deliveryLabel: slot.label, slotChosenAt: Date.now(), slotOther: false });
+    return { order: o, slot };
+  });
+}
+
+async function handleSlotCallback(q, id, key) {
+  const chat = q.message?.chat.id ?? q.from.id;
+  if (key === "other") {
+    const snap = await ordersCol.doc(id).get();
+    const o = snap.data();
+    if (!snap.exists || o.telegramUserId !== q.from.id || o.stage !== "ready") return { answer: "Buyurtma topilmadi", close: true };
+    await ordersCol.doc(id).update({ slotOther: true, slotOtherAt: Date.now() });
+    await tg("sendMessage", { chat_id: ordersChat(), text: `📞 ${ORDER_LABEL(o)}: mijoz boshqa kunni xohlaydi. ${o.name}, ${o.phone}\nQo'ng'iroq qilib, kunni kelishing.` });
+    await tg("sendMessage", { chat_id: chat, text: "Operatorimiz siz bilan bog'lanib, qulay kunni kelishadi." });
+    return { answer: "Operator bog'lanadi", close: true };
+  }
+  const r = await bookSlot(id, key, q.from.id);
+  // A stale or full window: offer the current free ones instead.
+  if (r.retry) {
+    await tg("sendMessage", { chat_id: chat, text: `${r.error}:`, reply_markup: await slotKeyboard(id) });
+    return { answer: r.error, close: true };
+  }
+  if (r.error) return { answer: r.error, close: Boolean(r.closed) };
+  await tg("sendMessage", {
+    chat_id: chat,
+    text: `🗓 Yetkazish vaqti: ${r.slot.label}.\nKuryer yo'lga chiqqanda xabar beramiz.`,
+  });
+  await tg("sendMessage", { chat_id: ordersChat(), text: `🗓 ${ORDER_LABEL(r.order)}: mijoz yetkazish vaqtini tanladi — ${r.slot.label}.` }).catch((err) =>
+    logger.warn("slot notice failed", err),
+  );
+  return { answer: "Vaqt band qilindi", close: true };
+}
+
 // Every stage change is announced to the buyer; shipped also carries the accept / problem buttons.
 async function notifyStage(id, o) {
   if (!o.telegramUserId) return;
   const no = ORDER_LABEL(o);
   const pickup = o.orderType === "pickup";
   const text = {
-    picking: `📦 Buyurtmangiz ${no} omborda yig'ilmoqda.`,
+    picking: `📦 Buyurtmangiz ${no} omborda tayyorlanmoqda.`,
     ready: pickup
       ? `✅ Buyurtmangiz ${no} tayyor, do'kondan olib ketishingiz mumkin.`
-      : `✅ Buyurtmangiz ${no} yig'ildi va jo'natishga tayyor.`,
+      : `✅ Mebelingiz ${no} tayyor! Qachon yetkazib beraylik? Qulay vaqtni tanlang:`,
     shipped: pickup
       ? `🏬 Buyurtmangiz ${no} sizga topshirildi. Hammasi joyidami?`
       : `🚚 Buyurtmangiz ${no} yo'lga chiqdi! Qabul qilganingizda pastdagi tugmani bosing.`,
@@ -870,7 +981,9 @@ async function notifyStage(id, o) {
             [{ text: "⚠️ Muammo bor", callback_data: `prob:${id}` }],
           ],
         }
-      : undefined;
+      : o.stage === "ready" && !pickup
+        ? await slotKeyboard(id)
+        : undefined;
   await tg("sendMessage", { chat_id: o.telegramUserId, text, reply_markup: buttons }).catch((err) =>
     logger.warn("stage notice failed", err),
   );
@@ -933,11 +1046,17 @@ async function pickBox(id, body, actor) {
 }
 
 async function handleCallback(q) {
-  const [action, id] = String(q.data || "").split(":");
+  const [action, id, slotKey] = String(q.data || "").split(":");
   let answer = "";
   // The buttons go away once the buyer's order is closed, whoever's press closed it.
   let closeButtons = false;
   try {
+    if (action === "slot") {
+      const r = await handleSlotCallback(q, id || "-", slotKey);
+      answer = r.answer;
+      closeButtons = r.close;
+      return;
+    }
     const snap = await ordersCol.doc(id || "-").get();
     const o = snap.data();
     if (!snap.exists || o.telegramUserId !== q.from.id) {
@@ -953,13 +1072,13 @@ async function handleCallback(q) {
       await setStage(id, ["shipped"], "problem");
       answer = "Operator tez orada bog'lanadi";
       closeButtons = true;
-      const chat = idList(ORDERS_CHAT_ID.value())[0] || idList(ADMIN_IDS.value())[0];
       await tg("sendMessage", {
-        chat_id: chat,
+        chat_id: ordersChat(),
         text: `⚠️ Mijoz ${ORDER_LABEL(o)} buyurtma bo'yicha muammo bildirdi.\n${o.name}, ${o.phone}\nMijoz bilan bog'laning.`,
       });
       await tg("sendMessage", { chat_id: q.from.id, text: "Xabaringiz qabul qilindi. Operatorimiz tez orada siz bilan bog'lanadi." });
     }
+  } finally {
     if (q.message && closeButtons) {
       await tg("editMessageReplyMarkup", {
         chat_id: q.message.chat.id,
@@ -967,7 +1086,6 @@ async function handleCallback(q) {
         reply_markup: { inline_keyboard: [] },
       }).catch(() => {});
     }
-  } finally {
     await tg("answerCallbackQuery", { callback_query_id: q.id, text: answer }).catch(() => {});
   }
 }
@@ -1335,6 +1453,34 @@ export const releaseUnpaid = onSchedule(
       const expired =
         status === "awaiting_payment" ? createdAt < now - PAY_WINDOW_MS : payingAt < now - 2 * PAY_WINDOW_MS;
       if (expired) await releaseOrder(doc.id, [status], "To'lov muddati o'tdi");
+    }
+  },
+);
+
+// Ready delivery orders without a chosen window: remind the buyer once, then hand it to the operator.
+export const remindSlots = onSchedule(
+  { schedule: "every 60 minutes", region: REGION, secrets: [BOT_TOKEN] },
+  async () => {
+    const now = Date.now();
+    const snap = await ordersCol.where("stage", "==", "ready").get();
+    for (const doc of snap.docs) {
+      const o = doc.data();
+      if (o.orderType !== "delivery" || o.deliverySlot || o.slotOther || !o.telegramUserId) continue;
+      try {
+        if (!o.slotEscalatedAt && o.readyAt < now - SLOT_ESCALATE_MS) {
+          await tg("sendMessage", { chat_id: ordersChat(), text: `⏳ ${ORDER_LABEL(o)}: mijoz 24 soatda yetkazish vaqtini tanlamadi. ${o.name}, ${o.phone}\nQo'ng'iroq qiling.` });
+          await doc.ref.update({ slotEscalatedAt: now });
+        } else if (!o.slotRemindedAt && o.readyAt < now - SLOT_REMIND_MS) {
+          await tg("sendMessage", {
+            chat_id: o.telegramUserId,
+            text: `🔔 Mebelingiz ${ORDER_LABEL(o)} omborda tayyor turibdi. Yetkazish vaqtini tanlang:`,
+            reply_markup: await slotKeyboard(doc.id),
+          });
+          await doc.ref.update({ slotRemindedAt: now });
+        }
+      } catch (err) {
+        logger.warn("slot reminder failed", err);
+      }
     }
   },
 );
