@@ -231,9 +231,17 @@ async function pick(body) {
   }
 }
 
+// USB scanners type keystrokes, so with a Russian layout active "EM" arrives as "УЬ" (same keys).
+const scanCode = (raw) =>
+  raw
+    .trim()
+    .toUpperCase()
+    .replace(/У/g, "E")
+    .replace(/Ь/g, "M");
+
 $("#scanInput").onkeydown = (e) => {
   if (e.key !== "Enter") return;
-  const code = e.target.value.trim();
+  const code = scanCode(e.target.value);
   e.target.value = "";
   if (code) pick({ code });
 };
@@ -348,7 +356,7 @@ function stockFlash(kind, text) {
 
 $("#stockScan").onkeydown = (e) => {
   if (e.key !== "Enter") return;
-  const code = e.target.value.trim().toUpperCase();
+  const code = scanCode(e.target.value);
   e.target.value = "";
   if (!code) return;
   const m = /^EM(\d{4,9})-(\d{1,2})$/.exec(code);
