@@ -738,7 +738,7 @@ async function notifyOrder(id, order) {
       await tg("sendMessage", {
         chat_id: order.telegramUserId,
         parse_mode: "HTML",
-        text: `✅ Buyurtmangiz #${order.number} qabul qilindi!${paid}\n\n${lines.join("\n")}\n\n<b>Jami:</b> ${formatSum(order.total)}\n\nMebel tayyor bo'lgach, yetkazish vaqtini tanlashingizni so'raymiz.`,
+        text: `✅ Buyurtmangiz #${order.number} qabul qilindi!${paid}\n\n${lines.join("\n")}\n\n<b>Jami:</b> ${formatSum(order.total)}\n\n${readinessText(order)}`,
       });
     }
   } catch (err) {
@@ -915,6 +915,30 @@ const WEEKDAYS_SHORT = ["Ya", "Du", "Se", "Ch", "Pa", "Ju", "Sh"];
 const SUNDAY = 0;
 
 const tashkentDay = (ms) => new Date(ms + TZ_OFFSET_MS).toISOString().slice(0, 10);
+
+// Everything ships from stock, so an order is packed within PREP_WORKING_DAYS. The receipt names
+// that day and the earliest delivery day, so the buyer knows what to expect before being asked.
+const PREP_WORKING_DAYS = 1;
+
+function workingDayAfter(day, n) {
+  let date = new Date(`${day}T00:00:00Z`);
+  for (let left = n; left > 0; ) {
+    date = new Date(date.getTime() + 864e5);
+    if (date.getUTCDay() !== SUNDAY) left--;
+  }
+  return date;
+}
+
+const dayLabel = (date) => `${date.getUTCDate()}-${MONTHS[date.getUTCMonth()]}, ${WEEKDAYS[date.getUTCDay()]}`;
+
+function readinessText(order) {
+  const ready = workingDayAfter(tashkentDay(Date.now()), PREP_WORKING_DAYS);
+  if (order.orderType === "pickup") {
+    return `📦 Mebelingiz <b>${dayLabel(ready)}</b> kuni tayyor bo'ladi, shu kundan do'kondan olib ketishingiz mumkin.`;
+  }
+  const firstDelivery = workingDayAfter(ready.toISOString().slice(0, 10), 1);
+  return `📦 Mebelingiz <b>${dayLabel(ready)}</b> kuni tayyor bo'ladi.\n🚚 Yetkazish <b>${dayLabel(firstDelivery)}</b> kunidan boshlab: qulay kun va soatni botda o'zingiz tanlaysiz.`;
+}
 const hh = (h) => `${String(h).padStart(2, "0")}:00`;
 const dayShort = (date) => `${date.getUTCDate()}-${MONTHS[date.getUTCMonth()].slice(0, 3)}`;
 
