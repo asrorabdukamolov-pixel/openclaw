@@ -4,7 +4,7 @@ const params = new URLSearchParams(location.search);
 const count = Math.max(1, Math.min(200, Number(params.get("count")) || 1));
 const info = document.querySelector("#info");
 
-// Roll sizes in mm; "s" fits board edges from 18 mm. The choice is remembered per screen.
+// Roll sizes in mm; "s" (default) fits board edges from 18 mm. The choice is remembered per screen.
 const SIZES = { l: [58, 40], m: [58, 30], s: [40, 15] };
 const sizeSelect = document.querySelector("#size");
 const pageStyle = document.createElement("style");
@@ -23,7 +23,7 @@ const savedSize = (() => {
     return null;
   }
 })();
-sizeSelect.value = SIZES[params.get("size")] ? params.get("size") : SIZES[savedSize] ? savedSize : "l";
+sizeSelect.value = SIZES[params.get("size")] ? params.get("size") : SIZES[savedSize] ? savedSize : "s";
 applySize(sizeSelect.value);
 sizeSelect.onchange = () => {
   applySize(sizeSelect.value);
