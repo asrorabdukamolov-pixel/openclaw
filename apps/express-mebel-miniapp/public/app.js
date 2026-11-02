@@ -626,10 +626,10 @@ function checkoutSheet(body) {
 
 function successSheet(order) {
   const note = order.paid
-    ? "💳 To'lov qabul qilindi. Chek botga yuborildi."
+    ? "💳 To'lov qabul qilindi. Chek va keyingi bosqichlar haqida xabarlar botga keladi."
     : order.pending
       ? "To'lov tasdiqlanmoqda. Tasdiqlangach, bot xabar beradi."
-      : "Tez orada operatorimiz siz bilan bog'lanadi.";
+      : "Chek botga yuborildi. Mebel tayyor bo'lishi va yetkazish haqida bot o'zi xabar beradi.";
   return (body) => {
     body.innerHTML = `<div style="text-align:center;padding:20px 0">
         <div style="font-size:56px">${order.pending ? "⏳" : "✅"}</div>
@@ -1272,7 +1272,7 @@ function orderSheet(id, admin) {
       actions.innerHTML = [
         canSelf ? '<button class="btn btn--danger" data-act="pick">❌ Buyurtmani bekor qilish</button>' : "",
         canAsk ? '<button class="btn btn--ghost" data-act="pick">Bekor qilishni so\'rash</button>' : "",
-        !admin && o.cancelRequest ? '<p class="hint">Bekor qilish so\'rovingiz operatorda.</p>' : "",
+        !admin && o.cancelRequest ? '<p class="hint">Bekor qilish so\'rovingiz ko\'rib chiqilmoqda, natija botga keladi.</p>' : "",
         reorder ? '<button class="btn" data-act="reorder">🔁 Qayta buyurtma berish</button>' : "",
         admin && o.cancelRequest ? '<button class="btn btn--danger" data-act="approve">✅ Bekor qilishni tasdiqlash</button><button class="btn btn--ghost" data-act="reject">↩️ So\'rovni rad etish</button>' : "",
         canAdmin && !o.cancelRequest ? '<button class="btn btn--ghost" data-act="pick">❌ Bekor qilish</button>' : "",
@@ -1308,7 +1308,7 @@ function orderSheet(id, admin) {
       if (!call) return;
       try {
         const r = await call();
-        toast(r.requested ? "So'rov operatorga yuborildi" : "Saqlandi");
+        toast(r.requested ? "So'rov yuborildi, natija botga keladi" : "Saqlandi");
         picking = false;
         await refresh();
         await reload().catch(() => {});

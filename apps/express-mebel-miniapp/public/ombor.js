@@ -97,7 +97,7 @@ let openId = null;
 function slotChip(o) {
   if (o.orderType !== "delivery" || (o.stage !== "ready" && o.stage !== "shipped")) return "";
   if (o.deliveryLabel) return `🗓 ${esc(o.deliveryLabel)}`;
-  return o.slotOther ? "📞 Boshqa kun: operator kelishadi" : "⏳ Mijoz vaqt tanlamagan";
+  return "⏳ Mijoz vaqt tanlamagan";
 }
 
 function cardHtml(o) {

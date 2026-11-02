@@ -159,14 +159,13 @@ va jami summaga (karta to'lovida alohida "Yetkazib berish" qatori bo'lib) qo'shi
 
 Yetkaziladigan buyurtma ombordan **Tayyor** bo'lganda mijozga bot xabar yuboradi: "Qachon yetkazib beraylik?" va
 eng yaqin bo'sh 4 ta vaqt (ertadan boshlab, yakshanbasiz; 10:00–13:00 va 14:00–18:00) + **🗓 Boshqa kunni tanlash**.
-"Boshqa kun" botning o'zida kalendar ochadi: 30 kun ichidagi bo'sh kunlar → soat → band. Operator faqat mijoz
-**📞 Operator bilan kelishish** ni bossa kerak bo'ladi.
+"Boshqa kun" botning o'zida kalendar ochadi: 30 kun ichidagi bo'sh kunlar → soat → band. Operator ishtirok etmaydi.
 
 - Bir vaqtga ko'pi bilan 4 ta buyurtma (`SLOT_CAPACITY`, `functions/index.js`); to'lgan vaqt taklif qilinmaydi,
   eski tugma bosilsa yangi bo'sh vaqtlar yuboriladi.
 - Tanlangan vaqt buyurtmalar guruhiga yoziladi va ombor ekranidagi kartada 🗓 bilan ko'rinadi.
-- 3 soatda tanlanmasa mijozga eslatma, 24 soatda tanlanmasa guruhga "qo'ng'iroq qiling" (`remindSlots`, har soatda).
-- "Operator bilan kelishish" bosilsa, guruhga mijozning ismi va telefoni bilan xabar boradi.
+- Tanlanmasa mijozga 3 va 24 soatda eslatma; 72 soatda guruhga faqat ma'lumot uchun xabar (`remindSlots`, har soatda).
+- Savdo jarayonida operator mijoz bilan bog'lanmaydi: hammasi bot orqali. Operator faqat shikoyatlarda, zarur bo'lsa.
 
 ## Boshqaruv paneli (kompyuter)
 

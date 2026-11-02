@@ -959,7 +959,6 @@ function fulfillmentView(id, o) {
     address: o.address,
     comment: o.comment,
     deliveryLabel: o.deliveryLabel ?? null,
-    slotOther: Boolean(o.slotOther),
     lines: o.items.map((i) => ({ name: i.name, qty: i.qty, kind: i.kind ?? "item" })),
     items: pickLines(o).map((i) => ({ name: i.name, qty: i.qty, sku: i.sku, boxes: i.boxes ?? 1 })),
     picked: o.picked || {},
@@ -1038,8 +1037,9 @@ const SLOT_CAPACITY = 4;
 // The buyer's own calendar reaches this far; the quick offer takes the earliest free windows.
 const SLOT_DAYS_AHEAD = 30;
 const SLOTS_OFFERED = 4;
-const SLOT_REMIND_MS = 3 * 60 * 60 * 1000;
-const SLOT_ESCALATE_MS = 24 * 60 * 60 * 1000;
+// The buyer picks the window alone: reminded after 3 h and 24 h; after 72 h the team only gets a note.
+const SLOT_REMINDERS_MS = [3 * 60 * 60 * 1000, 24 * 60 * 60 * 1000];
+const SLOT_ESCALATE_MS = 72 * 60 * 60 * 1000;
 const MONTHS = ["yanvar", "fevral", "mart", "aprel", "may", "iyun", "iyul", "avgust", "sentabr", "oktabr", "noyabr", "dekabr"];
 const WEEKDAYS = ["yakshanba", "dushanba", "seshanba", "chorshanba", "payshanba", "juma", "shanba"];
 const WEEKDAYS_SHORT = ["Ya", "Du", "Se", "Ch", "Pa", "Ju", "Sh"];
@@ -1131,7 +1131,6 @@ async function calendarKeyboard(id) {
     return { text: `${dayShort(date)} ${WEEKDAYS_SHORT[date.getUTCDay()]}`, callback_data: `slot:${id}:d${day}` };
   });
   const rows = Array.from({ length: Math.ceil(buttons.length / 4) }, (_, i) => buttons.slice(i * 4, i * 4 + 4));
-  rows.push([{ text: "📞 Operator bilan kelishish", callback_data: `slot:${id}:op` }]);
   return { inline_keyboard: rows };
 }
 
@@ -1156,13 +1155,13 @@ async function bookSlot(id, key) {
     const taken = await t.get(ordersCol.where("deliverySlot", "==", slot.key));
     const others = taken.docs.filter((d) => d.id !== id).length;
     if (others >= SLOT_CAPACITY) return { error: "Bu vaqt band bo'lib qoldi, boshqasini tanlang", retry: true };
-    t.update(ref, { deliverySlot: slot.key, deliveryLabel: slot.label, slotChosenAt: Date.now(), slotOther: false });
+    t.update(ref, { deliverySlot: slot.key, deliveryLabel: slot.label, slotChosenAt: Date.now() });
     return { order: o, slot };
   });
 }
 
 // Slot buttons edit their own message while the buyer browses (calendar, day, back), so the chat
-// keeps one picker; booking or handing over to the operator closes it.
+// keeps one picker; booking closes it.
 async function handleSlotCallback(q, id, arg) {
   const snap = await ordersCol.doc(id).get();
   const o = snap.data();
@@ -1179,12 +1178,6 @@ async function handleSlotCallback(q, id, arg) {
   if (day) {
     const date = new Date(`${day}T00:00:00Z`);
     return show(`🗓 ${date.getUTCDate()}-${MONTHS[date.getUTCMonth()]}, ${WEEKDAYS[date.getUTCDay()]}. Soatni tanlang:`, await dayKeyboard(id, day));
-  }
-  if (arg === "op") {
-    await ordersCol.doc(id).update({ slotOther: true, slotOtherAt: Date.now() });
-    await tg("sendMessage", { chat_id: ordersChat(), text: `📞 ${ORDER_LABEL(o)}: mijoz yetkazish kunini operator bilan kelishmoqchi. ${o.name}, ${o.phone}` });
-    await tg("sendMessage", { chat_id: chat, text: "Operatorimiz siz bilan bog'lanib, qulay kunni kelishadi." });
-    return { answer: "Operator bog'lanadi", close: true };
   }
   const r = await bookSlot(id, arg);
   if (r.error && !r.retry) return { answer: r.error, close: true };
@@ -1362,7 +1355,7 @@ async function buyerCancel(id, userId, code) {
     return { cancelled: true };
   }
   if (!ADMIN_CANCEL_STAGES.includes(o.stage)) {
-    throw new HttpError(409, "Jo'natilgan buyurtmani bekor qilib bo'lmaydi. Qaytarish uchun \"Muammo bor\" tugmasini bosing yoki operatorga yozing.");
+    throw new HttpError(409, "Jo'natilgan buyurtmani bekor qilib bo'lmaydi. Qaytarish uchun botdagi \"Muammo bor\" tugmasini bosing.");
   }
   if (o.cancelRequest) return { requested: true };
   await ordersCol.doc(id).update({ cancelRequest: { reason, at: Date.now() } });
@@ -1387,7 +1380,7 @@ async function rejectCancel(id, by) {
   if (o.telegramUserId) {
     await tg("sendMessage", {
       chat_id: o.telegramUserId,
-      text: `↩️ ${ORDER_LABEL(o)} bo'yicha bekor qilish so'rovi qabul qilinmadi, buyurtma davom etadi. Savollar bo'lsa, operatorimiz bog'lanadi.`,
+      text: `↩️ ${ORDER_LABEL(o)} bo'yicha bekor qilish so'rovi qabul qilinmadi: buyurtma omborda tayyorlangan va davom etadi.`,
     }).catch(() => {});
   }
 }
@@ -1441,13 +1434,13 @@ async function handleCallback(q) {
       closeButtons = true;
     } else if (action === "prob") {
       await setStage(id, ["shipped"], "problem");
-      answer = "Operator tez orada bog'lanadi";
+      answer = "Xabaringiz qabul qilindi";
       closeButtons = true;
       await tg("sendMessage", {
         chat_id: ordersChat(),
         text: `⚠️ Mijoz ${ORDER_LABEL(o)} buyurtma bo'yicha muammo bildirdi.\n${o.name}, ${o.phone}\nMijoz bilan bog'laning.`,
       });
-      await tg("sendMessage", { chat_id: q.from.id, text: "Xabaringiz qabul qilindi. Operatorimiz tez orada siz bilan bog'lanadi." });
+      await tg("sendMessage", { chat_id: q.from.id, text: "Xabaringiz qabul qilindi va ko'rib chiqilmoqda. Natijasi shu botga keladi; zarur bo'lsa mutaxassisimiz siz bilan bog'lanadi." });
     }
   } finally {
     if (q.message && closeButtons) {
@@ -1932,7 +1925,7 @@ export const releaseUnpaid = onSchedule(
   },
 );
 
-// Ready delivery orders without a chosen window: remind the buyer once, then hand it to the operator.
+// Ready delivery orders without a chosen window: remind the buyer, then note it for the team.
 export const remindSlots = onSchedule(
   { schedule: "every 60 minutes", region: REGION, secrets: [BOT_TOKEN] },
   async () => {
@@ -1940,18 +1933,19 @@ export const remindSlots = onSchedule(
     const snap = await ordersCol.where("stage", "==", "ready").get();
     for (const doc of snap.docs) {
       const o = doc.data();
-      if (o.orderType !== "delivery" || o.deliverySlot || o.slotOther || !o.telegramUserId) continue;
+      if (o.orderType !== "delivery" || o.deliverySlot || !o.telegramUserId) continue;
+      const sent = o.slotReminders ?? 0;
       try {
         if (!o.slotEscalatedAt && o.readyAt < now - SLOT_ESCALATE_MS) {
-          await tg("sendMessage", { chat_id: ordersChat(), text: `⏳ ${ORDER_LABEL(o)}: mijoz 24 soatda yetkazish vaqtini tanlamadi. ${o.name}, ${o.phone}\nQo'ng'iroq qiling.` });
+          await tg("sendMessage", { chat_id: ordersChat(), text: `⏳ ${ORDER_LABEL(o)}: mijoz 3 kundan beri yetkazish vaqtini tanlamadi (2 marta eslatildi). Mebel omborda turibdi.` });
           await doc.ref.update({ slotEscalatedAt: now });
-        } else if (!o.slotRemindedAt && o.readyAt < now - SLOT_REMIND_MS) {
+        } else if (sent < SLOT_REMINDERS_MS.length && o.readyAt < now - SLOT_REMINDERS_MS.at(sent)) {
           await tg("sendMessage", {
             chat_id: o.telegramUserId,
             text: `🔔 Mebelingiz ${ORDER_LABEL(o)} omborda tayyor turibdi. Yetkazish vaqtini tanlang:`,
             reply_markup: await slotKeyboard(doc.id),
           });
-          await doc.ref.update({ slotRemindedAt: now });
+          await doc.ref.update({ slotReminders: sent + 1 });
         }
       } catch (err) {
         logger.warn("slot reminder failed", err);
