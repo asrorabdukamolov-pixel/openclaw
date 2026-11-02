@@ -224,6 +224,21 @@ Havola 24 soat va bir marta ishlaydi. Xodimni o'chirish: o'sha bo'limda **O'chir
 - **Kod yangilansa**: `git pull` → `firebase deploy --project <ID>`.
 - Ma'lumotlarni Firebase konsolida ko'rish: **Firestore** → `products`, `stockMovements`, `orders`, `banners`.
 
+## Boshqa Firebase loyihaga ko'chirish
+
+`scripts/migrate-project.mjs` Firestore ma'lumotlari (mahsulotlar, qoldiq tarixi, buyurtmalar, bannerlar, xodimlar,
+ekranlar, sozlamalar) va Storage'dagi rasmlarni boshqa loyihaga ko'chiradi, rasm havolalarini yangi bucket'ga moslaydi.
+Cloud Shell'da (`functions/` da `npm install` qilingan bo'lsin):
+
+```bash
+node scripts/migrate-project.mjs --from <eski ID> --to <yangi ID> --from-bucket <eski bucket> --to-bucket <yangi bucket>          # sanab ko'rsatadi
+node scripts/migrate-project.mjs --from <eski ID> --to <yangi ID> --from-bucket <eski bucket> --to-bucket <yangi bucket> --apply  # ko'chiradi
+```
+
+Yangi loyihada mahsulot yoki buyurtma bo'lsa, skript hech narsani yozmasdan to'xtaydi. Kirish havolalari, panel sessiyalari,
+ekran ulash kodlari va taklif havolalari ko'chirilmaydi: ular qayta olinadi. Bucket nomlari:
+`gcloud storage buckets list --project <ID> --format="value(name)"`.
+
 ## Mahalliy sinov (dasturchilar uchun)
 
 ```bash
