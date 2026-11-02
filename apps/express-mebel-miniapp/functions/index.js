@@ -638,7 +638,10 @@ const PAY_WINDOW_MS = 30 * 60 * 1000;
 // Telegram Payments amounts are in the currency's smallest unit; UZS has two decimal places.
 const UZS_MINOR = 100;
 
-const cardsEnabled = () => PAYMENT_PROVIDER_TOKEN.value().trim().length > 1;
+// Secrets copied between projects through a file can carry a trailing newline, which Telegram
+// rejects as an invalid provider token; the token itself never contains whitespace.
+const providerToken = () => PAYMENT_PROVIDER_TOKEN.value().trim();
+const cardsEnabled = () => providerToken().length > 1;
 
 async function handleOrder(req, res) {
   const { user } = await authenticate(req);
@@ -725,7 +728,7 @@ async function handleOrder(req, res) {
       title: "Express Mebel Tezkor buyurtmasi",
       description: order.items.map((i) => `${i.name} × ${i.qty}`).join(", ").slice(0, 255),
       payload: orderRef.id,
-      provider_token: PAYMENT_PROVIDER_TOKEN.value(),
+      provider_token: providerToken(),
       currency: "UZS",
       prices: [
         ...order.items.map((i) => ({ label: `${i.name} × ${i.qty}`.slice(0, 64), amount: i.price * i.qty * UZS_MINOR })),
