@@ -36,6 +36,8 @@ const staffCol = db.collection("staff");
 const invitesCol = db.collection("staffInvites");
 const screensCol = db.collection("screens");
 const pairingsCol = db.collection("screenPairings");
+const adminLoginsCol = db.collection("adminLogins");
+const adminSessionsCol = db.collection("adminSessions");
 const countersRef = db.collection("meta").doc("counters");
 const deliveryRef = db.collection("meta").doc("delivery");
 
@@ -336,7 +338,21 @@ function sameSecret(a, b) {
 const isAdminId = (id) => idList(ADMIN_IDS.value()).includes(String(id));
 
 // Admins come from deploy config; everyone else's role is their `staff` document (invite links).
+// The desktop admin panel has no Telegram initData: an admin opens it once through a one-time link
+// from the bot, which becomes a session token. Sessions only work while the user is still in
+// ADMIN_IDS, so removing an admin from the config also locks their panel.
+async function adminFromSession(req) {
+  const token = req.get("x-admin-token");
+  if (!token || token.length < 32) return null;
+  const snap = await adminSessionsCol.doc(tokenId(token)).get();
+  const s = snap.data();
+  if (!snap.exists || s.expiresAt < Date.now() || !isAdminId(s.userId)) return null;
+  return { id: s.userId, first_name: s.name };
+}
+
 async function authenticate(req) {
+  const panelUser = await adminFromSession(req);
+  if (panelUser) return { user: panelUser, role: "admin" };
   const user = verifyInitData(req.get("x-telegram-init-data"));
   if (!user) return { user: null, role: null };
   if (isAdminId(user.id)) return { user, role: "admin" };
@@ -481,6 +497,13 @@ async function handleTelegramUpdate(req, res) {
   try {
     if (invite && msg.chat.type === "private") {
       await tg("sendMessage", { chat_id: msg.chat.id, parse_mode: "HTML", ...(await joinStaff(msg.from, invite[1])) });
+    } else if (msg?.text === "/panel" && msg.chat.type === "private" && isAdminId(msg.from.id)) {
+      const { url } = await createAdminLogin(msg.from);
+      await tg("sendMessage", {
+        chat_id: msg.chat.id,
+        text: "💻 Boshqaruv paneli: havolani kompyuter brauzerida oching. U 10 daqiqa va bir marta ishlaydi.",
+        reply_markup: { inline_keyboard: [[{ text: "💻 Panelni ochish", url }]] },
+      });
     } else if (msg?.text?.startsWith("/start")) {
       await tg("sendMessage", {
         chat_id: msg.chat.id,
@@ -495,6 +518,32 @@ async function handleTelegramUpdate(req, res) {
     logger.error("telegram update failed", err);
   }
   res.json({ ok: true });
+}
+
+const ADMIN_LOGIN_TTL_MS = 10 * 60 * 1000;
+const ADMIN_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+async function createAdminLogin(user) {
+  const code = randomUUID().replace(/-/g, "");
+  await adminLoginsCol.doc(code).set({ userId: user.id, name: staffName(user), expiresAt: Date.now() + ADMIN_LOGIN_TTL_MS });
+  // The code rides in the hash so it never reaches server logs or the Referer header.
+  return { url: `${WEBAPP_URL}/admin.html#login=${code}`, expiresAt: Date.now() + ADMIN_LOGIN_TTL_MS };
+}
+
+async function redeemAdminLogin(code) {
+  const token = randomUUID() + randomUUID();
+  const session = await db.runTransaction(async (t) => {
+    const ref = adminLoginsCol.doc(code);
+    const snap = await t.get(ref);
+    const login = snap.data();
+    if (!snap.exists || login.expiresAt < Date.now() || !isAdminId(login.userId)) return null;
+    t.delete(ref);
+    const data = { userId: login.userId, name: login.name, createdAt: Date.now(), expiresAt: Date.now() + ADMIN_SESSION_TTL_MS };
+    t.set(adminSessionsCol.doc(tokenId(token)), data);
+    return data;
+  });
+  if (!session) throw new HttpError(400, "Havola eskirgan yoki ishlatilgan. Botga /panel yozib yangisini oling");
+  return { token, name: session.name, expiresAt: session.expiresAt };
 }
 
 const ROLE_LABEL = { warehouse: "omborchi" };
@@ -923,6 +972,7 @@ const ORDER_LABEL = (o) => (o.number ? `#${o.number}` : "");
 
 // ---------- order history ----------
 const ORDER_LIST_LIMIT = 300;
+const ORDER_REPORT_LIMIT = 3000;
 
 function orderSummary(id, o) {
   return {
@@ -934,9 +984,16 @@ function orderSummary(id, o) {
     payment: o.payment,
     orderType: o.orderType,
     total: o.total,
+    goodsTotal: o.goodsTotal ?? o.total,
+    deliveryTotal: o.delivery?.total ?? 0,
+    paidAt: o.paidAt ?? null,
+    deliveredAt: o.deliveredAt ?? null,
+    cancelledAt: o.cancelledAt ?? null,
+    cancelReason: o.cancelReason ?? null,
     name: o.name,
     phone: o.phone,
     lines: o.items.map((i) => ({ id: i.id, name: i.name, qty: i.qty, price: i.price, kind: i.kind ?? "item" })),
+    deliverySlot: o.deliverySlot ?? null,
     deliveryLabel: o.deliveryLabel ?? null,
     cancelRequest: o.cancelRequest ?? null,
     refund: o.refund ?? null,
@@ -1732,8 +1789,40 @@ async function route(req, res) {
 
   if (path === "/api/orders" && method === "GET") {
     await requireRole(req, "admin");
-    const snap = await ordersCol.orderBy("createdAt", "desc").limit(ORDER_LIST_LIMIT).get();
+    // `from` (ms) asks for a period, as reports do; without it the latest orders come back.
+    const from = Number(req.query.from);
+    const query = Number.isFinite(from) && from > 0
+      ? ordersCol.where("createdAt", ">=", from).orderBy("createdAt", "desc").limit(ORDER_REPORT_LIMIT)
+      : ordersCol.orderBy("createdAt", "desc").limit(ORDER_LIST_LIMIT);
+    const snap = await query.get();
     return res.json(snap.docs.map((d) => orderSummary(d.id, d.data())));
+  }
+
+  if (path === "/api/admin/login-code" && method === "POST") {
+    const { user } = await requireRole(req, "admin");
+    return res.status(201).json(await createAdminLogin(user));
+  }
+  if (path === "/api/admin/session" && method === "POST") {
+    return res.status(201).json(await redeemAdminLogin(String(req.body?.code || "").replace(/[^a-f0-9]/g, "")));
+  }
+  if (path === "/api/admin/logout" && method === "POST") {
+    const token = req.get("x-admin-token");
+    if (token && token.length >= 32) await adminSessionsCol.doc(tokenId(token)).delete();
+    return res.json({ ok: true });
+  }
+  if (path === "/api/admin/info" && method === "GET") {
+    await requireRole(req, "admin");
+    return res.json({
+      project: PROJECT_ID,
+      webapp: WEBAPP_URL,
+      bot: await getBotUsername().catch(() => null),
+      admins: idList(ADMIN_IDS.value()).length,
+      ordersChat: idList(ORDERS_CHAT_ID.value()).length > 0,
+      cardPayments: cardsEnabled(),
+      slots: { capacity: SLOT_CAPACITY, windows: DELIVERY_WINDOWS, daysAhead: SLOT_DAYS_AHEAD },
+      prepDays: PREP_WORKING_DAYS,
+      categories: CATEGORIES,
+    });
   }
 
   if (path === "/api/orders/mine" && method === "GET") {

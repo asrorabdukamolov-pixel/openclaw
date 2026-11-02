@@ -168,6 +168,16 @@ eng yaqin bo'sh 4 ta vaqt (ertadan boshlab, yakshanbasiz; 10:00–13:00 va 14:00
 - 3 soatda tanlanmasa mijozga eslatma, 24 soatda tanlanmasa guruhga "qo'ng'iroq qiling" (`remindSlots`, har soatda).
 - "Operator bilan kelishish" bosilsa, guruhga mijozning ismi va telefoni bilan xabar boradi.
 
+## Boshqaruv paneli (kompyuter)
+
+`https://<ID>.web.app/admin.html` — kompyuter brauzeri uchun to'liq panel: Dashboard, Savdo va buyurtmalar, CRM (mijozlar),
+Logistika, Mahsulotlar (SKU, komplektlar), Ombor, Moliya, Buxgalteriya (1C uchun CSV), Marketing (bannerlar va tahlil),
+Xodimlar, Sozlamalar (yetkazish narxlari, ombor lokatsiyasi).
+
+**Kirish**: Telegram'da botga **/panel** yozing (faqat adminlar) yoki mini ilovada ☰ → **💻 Kompyuterda ochish**. Havola
+10 daqiqa va bir marta ishlaydi; brauzer 30 kun eslab qoladi. Admin `ADMIN_IDS` dan olib tashlansa, sessiyasi ham yopiladi.
+"Chiqish" tugmasi sessiyani o'chiradi.
+
 ## Buyurtmalar arxivi va bekor qilish
 
 - **Mijoz**: ☰ → **🧾 Mening buyurtmalarim** — holati, tarixi, "Qayta buyurtma berish".

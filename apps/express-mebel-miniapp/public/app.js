@@ -1319,6 +1319,27 @@ function orderSheet(id, admin) {
   };
 }
 
+// ---------- desktop panel link (admin) ----------
+function panelLinkSheet(body) {
+  body.innerHTML = `<h3>Kompyuterda ochish</h3><p class="empty">Havola tayyorlanmoqda…</p>`;
+  api("/api/admin/login-code", { method: "POST" })
+    .then(({ url, expiresAt }) => {
+      body.innerHTML = `<h3>Kompyuterda ochish</h3>
+        <p class="hint">Boshqaruv paneli kompyuter brauzerida ochiladi. Havola ${when(expiresAt)} gacha va bir marta ishlaydi; keyin kompyuter 30 kun eslab qoladi.</p>
+        <div class="invite" style="word-break:break-all">${esc(url)}</div>
+        <div class="stack" style="margin-top:12px">
+          <button class="btn" data-open-link>💻 Brauzerda ochish</button>
+          <button class="btn btn--ghost" data-copy-link>Nusxa olish</button>
+        </div>
+        <p class="hint" style="margin-top:12px">Yoki kompyuterdagi Telegram'da botga <b>/panel</b> deb yozing.</p>`;
+      body.onclick = (e) => {
+        if (e.target.closest("[data-open-link]")) tg?.openLink ? tg.openLink(url) : window.open(url, "_blank");
+        if (e.target.closest("[data-copy-link]")) navigator.clipboard?.writeText(url).then(() => toast("Nusxa olindi"), () => toast("Nusxa olib bo'lmadi"));
+      };
+    })
+    .catch((err) => toast(err.message));
+}
+
 // ---------- delivery rates (admin) ----------
 // Accepts "41.31, 69.27" or a Google / Yandex Maps link with coordinates in it.
 function parseCoords(text) {
@@ -1605,6 +1626,7 @@ function openDrawer() {
     ...(isStaff() ? [["stock", "📦  Ombor"]] : []),
     ...(isAdmin()
       ? [
+          ["panel", "💻  Kompyuterda ochish"],
           ["orders", "📋  Buyurtmalar"],
           ["delivery", "🚚  Yetkazish narxlari"],
           ["admin", "⚙️  Mahsulotlarni boshqarish"],
@@ -1640,6 +1662,7 @@ $("#drawerNav").onclick = (e) => {
   if (k === "mine") openSheet(ordersListSheet(false));
   if (k === "orders") openSheet(ordersListSheet(true));
   if (k === "delivery") openSheet(deliverySettingsSheet);
+  if (k === "panel") openSheet(panelLinkSheet);
   if (k.startsWith("cat:")) document.querySelector(`[data-tab="${k.slice(4)}"]`)?.click();
 };
 
