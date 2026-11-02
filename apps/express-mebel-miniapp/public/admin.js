@@ -1100,6 +1100,8 @@ $("#logoutBtn").onclick = async () => {
 };
 
 window.addEventListener("hashchange", () => {
+  // A login link pasted into an open panel tab only changes the hash: start over to redeem it.
+  if (location.hash.startsWith("#login=")) return location.reload();
   closeDrawer();
   render();
 });

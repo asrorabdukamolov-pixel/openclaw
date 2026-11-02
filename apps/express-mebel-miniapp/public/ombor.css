@@ -39,44 +39,15 @@ button {
   display: none !important;
 }
 
-/* brand mark */
+/* Official wordmark (brandbook); the light file has white letters for dark grounds. */
 .brand {
-  position: relative;
-  padding-left: 46px;
-  font-family: var(--font-lat);
-  font-style: italic;
-  font-weight: 700;
-  font-size: 26px;
-  color: var(--ink);
+  display: block;
+  width: 240px;
+  height: auto;
 }
 
-.brand b {
-  margin-left: 6px;
-}
-
-.brand i {
-  position: absolute;
-  left: 0;
-  width: 40px;
-  height: 5px;
-  background: var(--teal);
-  transform: skewX(-40deg);
-}
-
-.brand i:nth-child(1) {
-  top: 6px;
-  left: 6px;
-}
-.brand i:nth-child(2) {
-  top: 14px;
-  left: 3px;
-}
-.brand i:nth-child(3) {
-  top: 22px;
-}
-
-.brand--light {
-  color: var(--white);
+.brand--bar {
+  width: 170px;
 }
 
 /* pairing */

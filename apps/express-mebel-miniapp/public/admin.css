@@ -63,44 +63,16 @@ h3 {
 }
 
 /* ---------- brand ---------- */
+/* Official wordmark (brandbook); the light file has white letters for dark grounds. */
 .brand {
-  position: relative;
-  padding-left: 46px;
-  font-family: var(--font-lat);
-  font-style: italic;
-  font-weight: 700;
-  font-size: 22px;
+  display: block;
+  width: 220px;
+  height: auto;
 }
 
-.brand b {
-  margin-left: 5px;
-}
-
-.brand i {
-  position: absolute;
-  left: 0;
-  width: 36px;
-  height: 4px;
-  background: var(--teal);
-  transform: skewX(-40deg);
-}
-
-.brand i:nth-child(1) {
-  top: 5px;
-  left: 6px;
-}
-
-.brand i:nth-child(2) {
-  top: 12px;
-  left: 3px;
-}
-
-.brand i:nth-child(3) {
-  top: 19px;
-}
-
-.brand--light {
-  color: var(--white);
+.brand--side {
+  width: 180px;
+  margin: 0 4px;
 }
 
 /* ---------- login ---------- */

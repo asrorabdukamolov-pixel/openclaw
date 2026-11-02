@@ -509,7 +509,7 @@ async function handleTelegramUpdate(req, res) {
         chat_id: msg.chat.id,
         parse_mode: "HTML",
         text:
-          "Assalomu alaykum! 👋\n\n<b>Express Mebel</b> — sifatli mebel tez yetkazib beriladi.\n" +
+          "Assalomu alaykum! 👋\n\n<b>Express Mebel Tezkor</b> — Express Mebel'ning onlayn do'koni: ombordagi tayyor mebel, uyingizgacha tez yetkazamiz.\n" +
           "Katalogni ochish uchun quyidagi tugmani bosing.",
         reply_markup: { inline_keyboard: [[{ text: "🛋 Katalogni ochish", web_app: { url: WEBAPP_URL } }]] },
       });
@@ -722,7 +722,7 @@ async function handleOrder(req, res) {
   }
   try {
     const invoiceLink = await tg("createInvoiceLink", {
-      title: "Express Mebel buyurtmasi",
+      title: "Express Mebel Tezkor buyurtmasi",
       description: order.items.map((i) => `${i.name} × ${i.qty}`).join(", ").slice(0, 255),
       payload: orderRef.id,
       provider_token: PAYMENT_PROVIDER_TOKEN.value(),
@@ -1216,7 +1216,7 @@ async function notifyStage(id, o) {
     shipped: pickup
       ? `🏬 Buyurtmangiz ${no} sizga topshirildi. Hammasi joyidami?`
       : `🚚 Buyurtmangiz ${no} yo'lga chiqdi! Qabul qilganingizda pastdagi tugmani bosing.`,
-    delivered: `🎉 Rahmat! Buyurtma ${no} yakunlandi. Express Mebel'ni tanlaganingiz uchun rahmat.`,
+    delivered: `🎉 Rahmat! Buyurtma ${no} yakunlandi. Express Mebel Tezkor'ni tanlaganingiz uchun rahmat.`,
   }[o.stage];
   if (!text) return;
   const buttons =
