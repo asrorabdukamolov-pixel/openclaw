@@ -574,7 +574,7 @@ function productForm(id, newKind = "item") {
   const parts = (p?.components || []).map((c) => ({ ...c }));
   const title = p ? `${kit ? "Komplekt" : "Mahsulot"}: ${p.name}` : kit ? "Yangi komplekt" : "Yangi mahsulot / modul";
   openDrawer(title, (body) => {
-    body.innerHTML = `<form id="pForm">
+    body.innerHTML = `<form autocomplete="off" id="pForm">
       <div class="field">Rasmlar</div>
       <div class="thumbs" id="thumbs"></div>
       <input type="file" id="fileInput" accept="image/*" multiple hidden />
@@ -765,7 +765,7 @@ function stockForm(id) {
   const p = byId(id);
   openDrawer(`Ombor: ${p.name}`, (body) => {
     body.innerHTML = `<p class="note">Omborda <b>${p.stock} ta</b>. Kundalik kirim va chiqim ombor ekranida skaner bilan qilinadi; bu yerda faqat tuzatish uchun.</p>
-      <form id="mForm" style="margin-top:14px">
+      <form autocomplete="off" id="mForm" style="margin-top:14px">
         <div class="row2">
           <label class="field">Amal<select name="type"><option value="in">Kirim</option><option value="out">Chiqim</option></select></label>
           <label class="field">Miqdor<input class="input" name="qty" type="number" min="1" required /></label>
@@ -1109,9 +1109,9 @@ views.logistics = async (page, tools) => {
 
 function vehicleForm(v) {
   openDrawer(v ? "Mashina" : "Yangi mashina", (body) => {
-    body.innerHTML = `<form id="vForm">
-      <label class="field">Nomi / rusumi<input class="input" name="name" required value="${esc(v?.name)}" placeholder="Isuzu NPR, Labo, Damas" /></label>
-      <label class="field">Davlat raqami<input class="input" name="plate" value="${esc(v?.plate)}" placeholder="01 A 123 BC" /></label>
+    body.innerHTML = `<form autocomplete="off" id="vForm" autocomplete="off">
+      <label class="field">Nomi / rusumi<input class="input" name="vehicleName" autocomplete="off" required value="${esc(v?.name)}" placeholder="Isuzu NPR, Labo, Damas" /></label>
+      <label class="field">Davlat raqami<input class="input" name="vehiclePlate" autocomplete="off" value="${esc(v?.plate)}" placeholder="01 A 123 BC" /></label>
       <div class="row2">
         <label class="field">Yuk ko'tarish, kg<input class="input" name="capacityKg" type="number" min="1" value="${v?.capacityKg ?? ""}" /></label>
         <label class="field">Sig'imi, quti<input class="input" name="capacityBoxes" type="number" min="1" value="${v?.capacityBoxes ?? ""}" /></label>
@@ -1123,7 +1123,7 @@ function vehicleForm(v) {
       e.preventDefault();
       const f = new FormData(e.target);
       try {
-        await api(v ? `/api/vehicles/${v.id}` : "/api/vehicles", { method: v ? "PUT" : "POST", body: { name: f.get("name"), plate: f.get("plate"), capacityKg: f.get("capacityKg"), capacityBoxes: f.get("capacityBoxes"), active: f.has("active") } });
+        await api(v ? `/api/vehicles/${v.id}` : "/api/vehicles", { method: v ? "PUT" : "POST", body: { name: f.get("vehicleName"), plate: f.get("vehiclePlate"), capacityKg: f.get("capacityKg"), capacityBoxes: f.get("capacityBoxes"), active: f.has("active") } });
         toast("Saqlandi");
         closeDrawer();
         render();
@@ -1185,7 +1185,7 @@ views.marketing = async (page, tools) => {
 function bannerForm(b) {
   let image = b?.image || "";
   openDrawer(b ? "Bannerni tahrirlash" : "Yangi banner", (body) => {
-    body.innerHTML = `<form id="bForm">
+    body.innerHTML = `<form autocomplete="off" id="bForm">
       <div class="row2">
         <label class="field">Ko'rinish<select name="style">${Object.entries(BANNER_STYLE).map(([k, l]) => `<option value="${k}" ${b?.style === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
         <label class="field">Tartib raqami<input class="input" name="order" type="number" value="${b?.order ?? 1}" /></label>
@@ -1288,7 +1288,7 @@ views.settings = async (page) => {
   page.innerHTML = `
     <div class="grid cols-2">
       <div class="card"><h3>🚚 Yetkazish narxlari</h3>
-        <form id="dForm">
+        <form autocomplete="off" id="dForm">
           <div class="row2">
             <label class="field">1 km narxi (so'm)<input class="input" name="perKm" type="number" min="0" value="${cfg.perKm}" /></label>
             <label class="field">Tushirib berish (so'm)<input class="input" name="unloading" type="number" min="0" value="${cfg.unloading}" /></label>
@@ -1308,7 +1308,7 @@ views.settings = async (page) => {
         </form>
       </div>
       <div class="card"><h3>👥 Mijoz segmentlari</h3>
-        <form id="sForm">
+        <form autocomplete="off" id="sForm">
           <div class="row2">
             <label class="field">VIP: jami xarid, so'mdan<input class="input" name="vipSpend" type="number" min="1" step="1000" value="${seg.vipSpend}" /></label>
             <label class="field">Doimiy: kamida xaridlar soni<input class="input" name="repeatOrders" type="number" min="2" max="100" value="${seg.repeatOrders}" /></label>
