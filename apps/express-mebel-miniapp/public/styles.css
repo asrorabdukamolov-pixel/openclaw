@@ -1290,3 +1290,44 @@ select {
   text-decoration: none;
   text-align: center;
 }
+
+/* Assembly masters list. */
+.master {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+  padding: 14px;
+  border-radius: var(--radius);
+  background: var(--card);
+}
+
+.master p {
+  margin: 0;
+}
+
+.master-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.master-head img {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.master-samples {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+}
+
+.master-samples img {
+  width: 84px;
+  height: 84px;
+  flex: none;
+  border-radius: 12px;
+  object-fit: cover;
+}

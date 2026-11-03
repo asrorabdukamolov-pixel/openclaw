@@ -1581,6 +1581,106 @@ function complaintDrawer(c) {
   });
 }
 
+// ---------- assembly masters ----------
+const MJOB_STATE = { requested: ["Taklif", "warn"], accepted: ["Qabul qildi", "teal"], started: ["Ishlamoqda", "teal"], done: ["To'lov kutilmoqda", "warn"], paid: ["To'landi", "ok"], declined: ["Rad etdi", ""], cancelled: ["Bekor", ""] };
+
+const masterPhotos = (photos = {}, admin = false) =>
+  `<div class="doc-photos">${[["face", "Rasm"], ...(admin ? [["passport", "Pasport"]] : [])]
+    .filter(([k]) => photos[k])
+    .map(([k, label]) => `<a href="${esc(photos[k])}" target="_blank" rel="noopener"><img src="${esc(photos[k])}" alt="${label}"/><small>${label}</small></a>`)
+    .join("")}${(photos.samples ?? []).map((u, i) => `<a href="${esc(u)}" target="_blank" rel="noopener"><img src="${esc(u)}" alt=""/><small>Namuna ${i + 1}</small></a>`).join("")}</div>`;
+
+function masterApplicationDrawer(a) {
+  openDrawer("Usta arizasi", (body) => {
+    body.innerHTML = `${masterPhotos(a.photos, true)}
+      <dl class="specs" style="margin-top:14px">
+        <dt>Ism</dt><dd>${esc(a.name)}</dd><dt>Telefon</dt><dd>${esc(a.phone)}${a.username ? ` · @${esc(a.username)}` : ""}</dd>
+        <dt>Tumanlar</dt><dd>${esc(a.districts.join(", "))}</dd><dt>Tajriba</dt><dd>${a.experience} yil</dd>
+        <dt>O'zi haqida</dt><dd>${esc(a.about)}</dd><dt>Karta</dt><dd>${esc(a.cardMasked)} · ${esc(a.holder)}</dd>
+      </dl>
+      <div class="stack" style="margin-top:14px"><button class="btn" type="button" id="mOk">✅ Tasdiqlash</button></div>
+      <div class="stack" style="margin-top:10px"><input class="input" id="mReason" placeholder="Rad etish sababi" style="flex:1"/><button class="btn btn--ghost" type="button" id="mNo">Rad etish</button></div>`;
+    const act = (path, payload) => async () => {
+      try {
+        await api(`/api/master-applications/${a.id}/${path}`, { method: "POST", body: payload() });
+        toast(path === "approve" ? "Usta qabul qilindi" : "Rad etildi");
+        closeDrawer();
+        render();
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+    $("#mOk", body).onclick = act("approve", () => ({}));
+    $("#mNo", body).onclick = act("reject", () => ({ reason: $("#mReason", body).value }));
+  });
+}
+
+views.masters = async (page, tools) => {
+  const [masters, jobs] = await Promise.all([api("/api/masters/all"), api("/api/assembly/jobs")]);
+  const month = Date.now() - 30 * DAY;
+  const paid = jobs.filter((j) => j.status === "paid");
+  const monthPaid = paid.filter((j) => j.paidAt >= month);
+  const unpaid = masters.reduce((n, m) => n + m.admin.unpaid, 0);
+  tools.innerHTML = "";
+  page.innerHTML = `
+    <div class="grid cols-4">
+      <div class="card kpi"><small>Faol ustalar</small><b>${masters.filter((m) => m.admin.status === "active").length}</b><span>${masters.filter((m) => m.admin.status === "blocked").length} tasi bloklangan</span></div>
+      <div class="card kpi"><small>Yig'ish ishlari · 30 kun</small><b>${monthPaid.length}</b><span>${jobs.filter((j) => ["requested", "accepted", "started"].includes(j.status)).length} tasi jarayonda</span></div>
+      <div class="card kpi"><small>Komissiya daromadi · 30 kun</small><b>${sum(monthPaid.reduce((n, j) => n + j.fee - j.masterAmount, 0))} so'm</b><span>yig'ish tushumi ${sum(monthPaid.reduce((n, j) => n + j.fee, 0))}</span></div>
+      <div class="card kpi"><small>Ustalarga to'lanadi</small><b>${sum(unpaid)} so'm</b><span>${jobs.filter((j) => j.status === "done").length} ta ish mijoz to'lovini kutmoqda</span></div>
+    </div>
+    <div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Usta</th><th>Tumanlar</th><th class="num">Reyting</th><th class="num">Ishlar</th><th class="num">Ishlagan</th><th class="num">To'lanadi</th><th>Holat</th></tr></thead><tbody>${
+      masters
+        .sort((a, b) => b.admin.unpaid - a.admin.unpaid || (b.rating ?? 0) - (a.rating ?? 0))
+        .map((m) => `<tr class="click" data-master="${m.id}"><td><b>${esc(m.name)}</b><br><span class="muted">${esc(m.admin.phone)}</span></td><td>${esc(m.districts.join(", "))}</td><td class="num">${m.rating ? `⭐ ${m.rating} (${m.ratingCount})` : "—"}</td><td class="num">${m.jobsDone}</td><td class="num">${sum(m.admin.earned)}</td><td class="num"><b>${m.admin.unpaid ? sum(m.admin.unpaid) : "—"}</b></td><td>${m.admin.status === "active" ? pill(["Faol", "ok"]) : pill(["Bloklangan", "bad"])}</td></tr>`)
+        .join("") || '<tr><td colspan="7" class="empty">Hali usta yo\'q. Ustalar usta botida ro\'yxatdan o\'tadi, HR Xodimlar bo\'limida tasdiqlaydi.</td></tr>'
+    }</tbody></table></div>
+    <h3 style="margin:20px 0 10px">Yig'ish ishlari</h3>
+    <div class="table-wrap"><table><thead><tr><th>№</th><th>Sana</th><th>Usta</th><th>Mijoz</th><th>Buyurtma</th><th class="num">Narx</th><th class="num">Komissiya</th><th>Baho</th><th>Holat</th></tr></thead><tbody>${
+      jobs
+        .map((j) => `<tr><td>#${j.number}</td><td>${esc(j.date)}</td><td>${esc(j.masterName)}</td><td>${esc(j.customerName)}<br><span class="muted">${esc(j.customerPhone)}</span></td><td>#${j.orderNumber ?? "—"}</td><td class="num">${sum(j.fee)}</td><td class="num">${sum(j.fee - j.masterAmount)}</td><td>${j.rating ? `${"⭐".repeat(j.rating)}${j.review ? `<br><span class="muted">${esc(j.review)}</span>` : ""}` : "—"}</td><td>${pill(MJOB_STATE[j.status])}${j.donePhoto ? ` <a href="${esc(j.donePhoto)}" target="_blank" rel="noopener">📷</a>` : ""}</td></tr>`)
+        .join("") || '<tr><td colspan="9" class="empty">Hali ish yo\'q</td></tr>'
+    }</tbody></table></div>`;
+  page.onclick = (e) => {
+    const row = e.target.closest("[data-master]");
+    if (row) masterDrawer(masters.find((m) => m.id === row.dataset.master));
+  };
+};
+
+function masterDrawer(m) {
+  openDrawer(m.name, (body) => {
+    body.innerHTML = `${masterPhotos({ ...m.photosAll, face: m.photo, passport: m.admin.passport, samples: m.samples }, true)}
+      <dl class="specs" style="margin-top:14px">
+        <dt>Telefon</dt><dd>${esc(m.admin.phone)}${m.admin.username ? ` · @${esc(m.admin.username)}` : ""}</dd>
+        <dt>Tumanlar</dt><dd>${esc(m.districts.join(", "))}</dd><dt>Tajriba</dt><dd>${m.experience} yil</dd>
+        <dt>Reyting</dt><dd>${m.rating ? `⭐ ${m.rating} (${m.ratingCount} baho)` : "—"} · ${m.jobsDone} ta ish</dd>
+        <dt>Ishlagan</dt><dd>${sum(m.admin.earned)} so'm</dd>
+        <dt>Karta</dt><dd><b>${esc(m.admin.card.replace(/(\d{4})(?=\d)/g, "$1 "))}</b> · ${esc(m.admin.holder)} <button class="btn btn--ghost" type="button" id="copyCard">Nusxa</button></dd>
+      </dl>
+      ${
+        m.admin.unpaid
+          ? `<div class="note" style="margin-top:12px">💳 Ustaga to'lanadi: <b>${sum(m.admin.unpaid)} so'm</b>. Kartaga o'tkazgach, «O'tkazildi» ni bosing — ustaga botda xabar boradi.</div>
+             <button class="btn" type="button" id="payout" style="margin-top:8px">✅ ${sum(m.admin.unpaid)} so'm o'tkazildi</button>`
+          : '<p class="muted" style="margin-top:12px">To\'lanadigan summa yo\'q.</p>'
+      }
+      <div class="stack" style="margin-top:14px">${m.admin.status === "active" ? '<button class="btn btn--ghost" type="button" data-mact="block">⛔ Bloklash</button>' : '<button class="btn" type="button" data-mact="unblock">✅ Faollashtirish</button>'}</div>`;
+    $("#copyCard", body).onclick = () => navigator.clipboard.writeText(m.admin.card).then(() => toast("Karta raqami nusxalandi"), () => toast("Nusxa olib bo'lmadi"));
+    body.onclick = async (e) => {
+      const act = e.target.closest("#payout") ? "payout" : e.target.closest("[data-mact]")?.dataset.mact;
+      if (!act) return;
+      if (act === "block" && !window.confirm(`${m.name} bloklansinmi? Mijozlar uni ko'rmaydi.`)) return;
+      try {
+        await api(`/api/masters/${m.id}/${act}`, { method: "POST" });
+        toast({ payout: "To'lov yozildi", block: "Bloklandi", unblock: "Faollashtirildi" }[act]);
+        closeDrawer();
+        render();
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+  });
+}
+
 const BANNER_STYLE = { photo: "Rasm", dark: "Qora", teal: "Moviy" };
 
 views.marketing = async (page, tools) => {
@@ -1755,12 +1855,19 @@ function driverDrawer(m) {
 
 views.staff = async (page, tools) => {
   tools.innerHTML = '<button class="btn" type="button" data-invite="warehouse">＋ Omborchini taklif qilish</button><button class="btn btn--dark" type="button" data-invite="driver">＋ Haydovchini taklif qilish</button>';
-  const [staff, screens, apps] = await Promise.all([api("/api/staff"), api("/api/screens"), api("/api/driver-applications")]);
+  const [staff, screens, apps, masterApps] = await Promise.all([api("/api/staff"), api("/api/screens"), api("/api/driver-applications"), api("/api/master-applications")]);
   page.innerHTML = `
     ${
       apps.length
         ? `<div class="card" style="margin-bottom:16px"><h3>🆕 Haydovchi arizalari (${apps.length})</h3><ul class="list">${apps
             .map((a) => `<li data-app="${a.id}" style="cursor:pointer"><span style="display:flex;gap:12px;align-items:center"><img class="thumb" src="${esc(a.photos?.withCar)}" alt=""/><span><b>${esc(a.name)}</b> · ${esc(a.phone)}<br><span class="muted">${esc(a.car)} · ${esc(a.plate)} · ${a.capacityKg} kg · ${when(a.submittedAt)}</span></span></span>${pill(["Ko'rib chiqish", "warn"])}</li>`)
+            .join("")}</ul></div>`
+        : ""
+    }
+    ${
+      masterApps.length
+        ? `<div class="card" style="margin-bottom:16px"><h3>🔧 Usta arizalari (${masterApps.length})</h3><ul class="list">${masterApps
+            .map((a) => `<li data-mapp="${a.id}" style="cursor:pointer"><span style="display:flex;gap:12px;align-items:center"><img class="thumb" src="${esc(a.photos?.face)}" alt=""/><span><b>${esc(a.name)}</b> · ${esc(a.phone)}<br><span class="muted">${esc(a.districts.join(", "))} · ${a.experience} yil · ${when(a.submittedAt)}</span></span></span>${pill(["Ko'rib chiqish", "warn"])}</li>`)
             .join("")}</ul></div>`
         : ""
     }
@@ -1792,6 +1899,8 @@ views.staff = async (page, tools) => {
   page.onclick = async (e) => {
     const app = e.target.closest("[data-app]");
     if (app) return applicationDrawer(apps.find((a) => a.id === app.dataset.app));
+    const mapp = e.target.closest("[data-mapp]");
+    if (mapp) return masterApplicationDrawer(masterApps.find((a) => a.id === mapp.dataset.mapp));
     const rm = e.target.closest("[data-remove]");
     const un = e.target.closest("[data-unpair]");
     const drv = e.target.closest("[data-driver]");
@@ -1809,7 +1918,7 @@ views.staff = async (page, tools) => {
 };
 
 views.settings = async (page) => {
-  const [cfg, seg] = await Promise.all([api("/api/delivery/settings"), api("/api/crm/segments")]);
+  const [cfg, seg, asm] = await Promise.all([api("/api/delivery/settings"), api("/api/crm/segments"), api("/api/assembly/settings")]);
   const info = state.info;
   page.innerHTML = `
     <div class="grid cols-2">
@@ -1845,6 +1954,17 @@ views.settings = async (page) => {
           <button class="btn" type="submit" style="margin-top:8px">Saqlash</button>
         </form>
       </div>
+      <div class="card"><h3>🔧 Yig'ish xizmati (ustalar)</h3>
+        <form id="aForm" autocomplete="off">
+          <div class="row2">
+            <label class="field">Yig'ish narxi, mebel narxidan %<input class="input" name="percent" type="number" min="0" max="100" step="0.5" value="${asm.percent}" /></label>
+            <label class="field">Eng kam yig'ish narxi, so'm<input class="input" name="minFee" type="number" min="0" step="1000" value="${asm.minFee}" /></label>
+          </div>
+          <label class="field">Kompaniya komissiyasi, yig'ish narxidan %<input class="input" name="commission" type="number" min="0" max="100" step="0.5" value="${asm.commission}" /></label>
+          <p class="muted">Masalan: 10 000 000 so'mlik mebel → yig'ish ${sum(Math.max(asm.minFee, Math.round((10_000_000 * asm.percent) / 100 / 1000) * 1000))} so'm, ustaga ${sum(Math.max(asm.minFee, Math.round((10_000_000 * asm.percent) / 100 / 1000) * 1000) * (1 - asm.commission / 100))} so'm. Yangi qoidalar yangi ishlarga qo'llanadi.</p>
+          <button class="btn" type="submit" style="margin-top:8px">Saqlash</button>
+        </form>
+      </div>
       <div class="card"><h3>Tizim</h3><dl class="specs">
         <dt>Loyiha</dt><dd>${esc(info.project)}</dd>
         <dt>Bot</dt><dd>${info.bot ? `@${esc(info.bot)}` : "—"}</dd>
@@ -1857,6 +1977,17 @@ views.settings = async (page) => {
         <dt>Bo'limlar</dt><dd>${info.categories.map((c) => esc(c.name)).join(", ")}</dd>
       </dl><p class="muted">Bot tokeni, adminlar ro'yxati va to'lov tokeni xavfsizlik uchun faqat Cloud Shell orqali o'zgartiriladi.</p></div>
     </div>`;
+  $("#aForm").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    try {
+      await api("/api/assembly/settings", { method: "PUT", body: { percent: f.get("percent"), minFee: f.get("minFee"), commission: f.get("commission") } });
+      toast("Saqlandi");
+      render();
+    } catch (err) {
+      toast(err.message);
+    }
+  };
   $("#sForm").onsubmit = async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
@@ -1893,6 +2024,7 @@ const TITLES = {
   crm: "CRM: mijozlar",
   logistics: "Logistika",
   complaints: "Shikoyatlar",
+  masters: "Ustalar",
   products: "Mahsulotlar (SKU)",
   stock: "Ombor",
   purchases: "Zakup",

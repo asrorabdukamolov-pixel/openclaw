@@ -219,6 +219,22 @@ Haydovchi Telegram ilovada **☰ → 🚚 Reyslarim**:
 
 Mahsulot og'irligi (kg) mahsulot formasida yoki Excel'dagi "Og'irligi, kg" ustunida kiritiladi; komplekt og'irligi modullardan hisoblanadi.
 
+## Ustalar (mebel yig'ish)
+
+Ustalar uchun alohida bot (BotFather'da ochiladi, tokeni `MASTER_BOT_TOKEN` secret):
+`firebase functions:secrets:set MASTER_BOT_TOKEN --project <ID>` → `firebase deploy` → `/api/setup` (javobda `masterBot`).
+
+- **Usta ro'yxatdan o'tadi (usta botida):** telefon, ism, ishlaydigan tumanlar, tajriba, o'zi haqida, rasmi, pasport,
+  1–5 ta ish namunasi, **ish haqi kartasi** (16 xonali) va karta egasi. HR: panel → Xodimlar (HR) → **Usta arizalari** → Tasdiqlash / Rad etish.
+- **Narx (Sozlamalar → Yig'ish xizmati):** yig'ish = mebel narxining **10%**, eng kami **100 000 so'm**; kompaniya komissiyasi
+  yig'ish narxining **10%**. Yangi qoidalar yangi ishlarga qo'llanadi.
+- **Mijoz:** 🧾 Mening buyurtmalarim → buyurtma (qo'lga tekkan) → **🔧 Usta topish** → tuman, reyting, ishlar soni, namunalar va izohlar
+  bo'yicha ustani tanlaydi → kun va vaqt oralig'i → so'rov ustaga boradi.
+- **Usta (botda):** Qabul qilaman / Rad etaman → qabul qilsa mijozga usta telefoni boradi → **▶️ Boshladim** → **✅ Tugatdim** + yig'ilgan mebel rasmi.
+- Shu zahoti mijozga asosiy botda **to'lov cheki** (karta) boradi; to'lagach usta va mijozga xabar, mijoz 1–5 baho va izoh qoldiradi.
+- **Panel → 🔧 Ustalar:** reyting, ishlar, ishlagan va **to'lanadigan** summa; ustani ochib karta raqamini nusxalaysiz,
+  pulni kartaga o'tkazgach **O'tkazildi** → ustaga botda xabar. Bloklash / faollashtirish. Yig'ish ishlari ro'yxati va komissiya daromadi.
+
 ## Zakup (ta'minotchilar va kirim)
 
 Panel → **🏭 Zakup**:

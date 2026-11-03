@@ -1231,6 +1231,7 @@ function ordersListSheet(admin) {
 
 function orderSheet(id, admin) {
   let o = null;
+  let job = null; // the assembly job for this order, if a master was called
   let picking = false; // reason picker open
   return (body) => {
     const draw = () => {
@@ -1246,6 +1247,10 @@ function orderSheet(id, admin) {
       const reorder = !admin && (o.stage === "delivered" || o.stage === "cancelled");
       // A problem can be reported while on the way and up to 30 days after delivery.
       const canComplain = !admin && (o.stage === "shipped" || o.stage === "problem" || (o.stage === "delivered" && Date.now() - (o.deliveredAt ?? 0) < 30 * 864e5));
+      // A master is called once the furniture is with the buyer and no job is running for it.
+      const received = o.stage === "delivered" || o.handedAt || (o.orderType === "pickup" && o.stage === "shipped");
+      const jobActive = job && ["requested", "accepted", "started", "done"].includes(job.status);
+      const canMaster = !admin && received && o.status !== "cancelled" && !jobActive && !(job && job.status === "paid");
       body.innerHTML = `<h3>${orderNo(o)} · ${orderState(o)}</h3>
         <ul class="kit-parts">${lines}</ul>
         <dl class="specs">
@@ -1278,6 +1283,8 @@ function orderSheet(id, admin) {
         canSelf ? '<button class="btn btn--danger" data-act="pick">❌ Buyurtmani bekor qilish</button>' : "",
         canAsk ? '<button class="btn btn--ghost" data-act="pick">Bekor qilishni so\'rash</button>' : "",
         !admin && o.cancelRequest ? '<p class="hint">Bekor qilish so\'rovingiz ko\'rib chiqilmoqda, natija botga keladi.</p>' : "",
+        jobActive ? `<p class="hint">🔧 Usta ${esc(job.masterName)}: ${JOB_STATE[job.status]} · ${esc(job.date)}</p>` : "",
+        canMaster ? '<button class="btn" data-act="master">🔧 Usta topish (yig\'ib berish)</button>' : "",
         canComplain ? '<button class="btn btn--ghost" data-act="complain">⚠️ Muammo bildirish</button>' : "",
         reorder ? '<button class="btn" data-act="reorder">🔁 Qayta buyurtma berish</button>' : "",
         admin && o.cancelRequest ? '<button class="btn btn--danger" data-act="approve">✅ Bekor qilishni tasdiqlash</button><button class="btn btn--ghost" data-act="reject">↩️ So\'rovni rad etish</button>' : "",
@@ -1286,7 +1293,9 @@ function orderSheet(id, admin) {
       ].join("");
     };
     const refresh = async () => {
-      o = await api(`/api/orders/${id}`);
+      const [order, jobs] = await Promise.all([api(`/api/orders/${id}`), admin ? [] : api("/api/assembly/mine").catch(() => [])]);
+      o = order;
+      job = jobs.filter((j) => j.orderId === id).sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
       draw();
     };
     draw();
@@ -1304,6 +1313,7 @@ function orderSheet(id, admin) {
         for (const l of again) setQty(l.id, Math.min(l.qty, byId(l.id).stock));
         return openSheet(cartSheet);
       }
+      if (act === "master") return openSheet(mastersSheet(o));
       if (act === "complain") {
         try {
           await api(`/api/orders/${id}/complaint`, { method: "POST" });
@@ -1493,6 +1503,92 @@ function routesSheet(body) {
   };
   draw();
   run(api("/api/driver/routes"));
+}
+
+// ---------- assembly masters: the buyer picks a master and asks for a day ----------
+const JOB_STATE = { requested: "javob kutilmoqda", accepted: "qabul qildi", started: "yig'moqda", done: "to'lov kutilmoqda", paid: "yakunlandi" };
+const assemblyFee = (goods, s) => Math.max(s.minFee, Math.round((goods * s.percent) / 100 / 1000) * 1000);
+
+function mastersSheet(order) {
+  let data = null;
+  let district = "";
+  let chosen = null;
+  return (body) => {
+    const draw = () => {
+      if (!data) {
+        body.innerHTML = '<p class="empty">Ustalar yuklanmoqda…</p>';
+        return;
+      }
+      const fee = assemblyFee(order.goodsTotal ?? order.total, data.settings);
+      if (chosen) {
+        const today = new Date(Date.now() + 5 * 3600e3).toISOString().slice(0, 10);
+        const max = new Date(Date.now() + 5 * 3600e3 + 30 * 864e5).toISOString().slice(0, 10);
+        body.innerHTML = `<h3>🔧 ${esc(chosen.name)}</h3>
+          <p class="hint">Yig'ish narxi: <b>${sum(fee)} so'm</b> — usta ishni tugatgach, botga to'lov cheki keladi (karta bilan).</p>
+          <label class="field">Qaysi kuni?<input type="date" id="mDate" min="${today}" max="${max}" value="${today}" /></label>
+          <label class="field">Qaysi vaqtda?<select id="mWindow">${Object.entries(data.windows).map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}</select></label>
+          <label class="field">Izoh (ixtiyoriy)<input id="mNote" placeholder="Masalan: 5-qavat, lift yo'q; domofon 25" /></label>
+          <div class="stack" style="margin-top:12px"><button class="btn" data-m="send">📨 Ustaga so'rov yuborish</button><button class="btn btn--ghost" data-m="back">◀️ Boshqa usta</button></div>
+          <p class="hint" style="margin-top:10px">Usta so'rovni qabul qilsa, botga uning telefoni keladi va u siz bilan aniq vaqtni kelishadi.</p>`;
+        return;
+      }
+      body.innerHTML = `<h3>🔧 Usta topish</h3>
+        <p class="hint">Yig'ish narxi: <b>${sum(fee)} so'm</b> (mebel narxidan ${data.settings.percent}%, eng kami ${sum(data.settings.minFee)}). Ustani o'zingiz tanlaysiz.</p>
+        <label class="field">Tuman<select id="mDistrict"><option value="">Barcha tumanlar</option>${data.districts.map((d) => `<option ${d === district ? "selected" : ""}>${esc(d)}</option>`).join("")}</select></label>
+        ${
+          data.masters.length
+            ? data.masters
+                .map(
+                  (m) => `<div class="master">
+                    <div class="master-head">${m.photo ? `<img src="${esc(m.photo)}" alt=""/>` : '<span class="staff-avatar">🔧</span>'}<div><b>${esc(m.name)}</b><br><small>${m.rating ? `⭐ ${m.rating} (${m.ratingCount})` : "yangi usta"} · ${m.jobsDone} ta ish · ${m.experience} yil tajriba</small></div></div>
+                    <small>📍 ${esc(m.districts.join(", "))}</small>
+                    <p>${esc(m.about)}</p>
+                    ${m.samples.length ? `<div class="master-samples">${m.samples.map((u) => `<img src="${esc(u)}" alt="Ish namunasi"/>`).join("")}</div>` : ""}
+                    ${m.reviews?.length ? m.reviews.slice(0, 3).map((r) => `<p class="hint">${"⭐".repeat(r.rating)} ${esc(r.text)}</p>`).join("") : ""}
+                    <button class="btn" data-pick-master="${m.id}">Tanlash</button>
+                  </div>`,
+                )
+                .join("")
+            : '<p class="empty">Bu tumanda hozircha usta yo\'q. Boshqa tumanni tanlang.</p>'
+        }`;
+    };
+    const load = () =>
+      api(`/api/masters${district ? `?district=${encodeURIComponent(district)}` : ""}`)
+        .then((d) => {
+          data = d;
+          draw();
+        })
+        .catch((err) => toast(err.message));
+    body.onchange = (e) => {
+      if (e.target.id !== "mDistrict") return;
+      district = e.target.value;
+      load();
+    };
+    body.onclick = async (e) => {
+      const pick = e.target.closest("[data-pick-master]");
+      if (pick) {
+        chosen = data.masters.find((m) => m.id === pick.dataset.pickMaster);
+        return draw();
+      }
+      const m = e.target.closest("[data-m]")?.dataset.m;
+      if (m === "back") {
+        chosen = null;
+        return draw();
+      }
+      if (m !== "send") return;
+      e.target.disabled = true;
+      try {
+        await api("/api/assembly", { method: "POST", body: { orderId: order.id, masterId: chosen.id, date: $("#mDate").value, window: $("#mWindow").value, note: $("#mNote").value } });
+        toast("So'rov ustaga yuborildi. Javobi botga keladi");
+        back();
+      } catch (err) {
+        e.target.disabled = false;
+        toast(err.message);
+      }
+    };
+    draw();
+    load();
+  };
 }
 
 // ---------- delivery rates (admin) ----------

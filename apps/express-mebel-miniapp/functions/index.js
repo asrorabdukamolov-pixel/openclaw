@@ -11,17 +11,20 @@
 import { createHash, createHmac, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { initializeApp } from "firebase-admin/app";
-import { getFirestore } from "firebase-admin/firestore";
+import { FieldValue, getFirestore } from "firebase-admin/firestore";
 import { getStorage } from "firebase-admin/storage";
 import { onRequest } from "firebase-functions/https";
 import { onSchedule } from "firebase-functions/scheduler";
 import { logger } from "firebase-functions";
 import { defineSecret, defineString } from "firebase-functions/params";
+import { createMasters } from "./masters.js";
 
 const BOT_TOKEN = defineSecret("BOT_TOKEN");
 const PAYMENT_PROVIDER_TOKEN = defineSecret("PAYMENT_PROVIDER_TOKEN");
 // The drivers' own bot (registration and route work); a separate BotFather bot.
 const DRIVER_BOT_TOKEN = defineSecret("DRIVER_BOT_TOKEN");
+// The assembly masters' bot (registration and jobs); see masters.js.
+const MASTER_BOT_TOKEN = defineSecret("MASTER_BOT_TOKEN");
 const ADMIN_IDS = defineString("ADMIN_IDS", { description: "Admin Telegram user ids, comma-separated" });
 const ORDERS_CHAT_ID = defineString("ORDERS_CHAT_ID", {
   default: "-",
@@ -798,6 +801,8 @@ async function handleTelegramUpdate(req, res) {
         text: "💻 Boshqaruv paneli: havolani kompyuter brauzerida oching. U 10 daqiqa va bir marta ishlaydi.",
         reply_markup: { inline_keyboard: [[{ text: "💻 Panelni ochish", url }]] },
       });
+    } else if (msg && msg.chat.type === "private" && (!msg.text?.startsWith("/") || msg.text === "/skip") && (await masters.collectReview(msg))) {
+      // A master review after the rating buttons.
     } else if (msg && msg.chat.type === "private" && !msg.text?.startsWith("/") && (await collectComplaint(msg))) {
       // A complaint draft took the message (its text or a photo).
     } else if (msg?.text?.startsWith("/start")) {
@@ -911,7 +916,7 @@ async function handleSetup(res) {
     // Most often a wrong BOT_TOKEN: Telegram answers "Unauthorized".
     throw new HttpError(502, `Telegram bilan ulanib bo'lmadi (${err.message}). BOT_TOKEN ni tekshiring.`);
   }
-  res.json({ ok: true, bot: `@${bot.username}`, driverBot: await setupDriverBot(), webapp: WEBAPP_URL, webhook, seeded });
+  res.json({ ok: true, bot: `@${bot.username}`, driverBot: await setupDriverBot(), masterBot: await masters.setupMasterBot(), webapp: WEBAPP_URL, webhook, seeded });
 }
 
 const FIRST_SKU = 100000;
@@ -1170,6 +1175,7 @@ async function notifyOrder(id, order) {
 // Telegram asks before charging; it must be answered within 10 seconds.
 async function handlePreCheckout(query) {
   if (String(query.invoice_payload).startsWith("due:")) return handleDuePreCheckout(query);
+  if (String(query.invoice_payload).startsWith("asm:")) return masters.preCheckout(query);
   const ok = await db.runTransaction(async (t) => {
     const ref = ordersCol.doc(String(query.invoice_payload));
     const snap = await t.get(ref);
@@ -1193,6 +1199,7 @@ async function handlePreCheckout(query) {
 async function handleSuccessfulPayment(msg) {
   const pay = msg.successful_payment;
   if (String(pay.invoice_payload).startsWith("due:")) return handleDuePaid(pay);
+  if (String(pay.invoice_payload).startsWith("asm:")) return masters.paid(pay);
   const ref = ordersCol.doc(String(pay.invoice_payload));
   const result = await db.runTransaction(async (t) => {
     const snap = await t.get(ref);
@@ -1723,6 +1730,11 @@ async function handleCallback(q) {
   // The buttons go away once the buyer's order is closed, whoever's press closed it.
   let closeButtons = false;
   try {
+    if (action === "asr") {
+      answer = await masters.rate(q);
+      closeButtons = true;
+      return;
+    }
     if (action === "cmp") {
       const [, act, cid, arg] = String(q.data).split(":");
       const r = await handleComplaintCallback(q, act, cid || "-", arg);
@@ -3269,12 +3281,43 @@ async function handleLogistics(req, res, path, method) {
   return null;
 }
 
+// Built once all helpers exist; the module only reaches the rest of the backend through this object.
+const masters = createMasters({
+  db,
+  HttpError,
+  tg,
+  callTelegram,
+  logger,
+  MASTER_BOT_TOKEN,
+  WEBAPP_URL,
+  UZS_MINOR,
+  ordersCol,
+  countersRef,
+  hmac: (key, text) => createHmac("sha256", key).update(text).digest("hex"),
+  sameSecret,
+  saveBotPhoto,
+  uuid: randomUUID,
+  increment: (n) => FieldValue.increment(n),
+  adminIds: () => idList(ADMIN_IDS.value()),
+  formatSum,
+  providerToken,
+  ordersChat,
+  requireRole,
+  authenticate,
+  staffName,
+});
+
 async function route(req, res) {
   const path = req.path;
   const method = req.method;
 
   if (path === "/api/telegram" && method === "POST") return handleTelegramUpdate(req, res);
   if (path === "/api/driverbot" && method === "POST") return handleDriverBot(req, res);
+  if (path === "/api/masterbot" && method === "POST") return masters.handleMasterBot(req, res);
+  if (path.startsWith("/api/assembly") || path.startsWith("/api/masters") || path.startsWith("/api/master-applications")) {
+    const handled = await masters.handleApi(req, res, path, method);
+    if (handled !== null) return handled;
+  }
   if (path.startsWith("/api/suppliers") || path.startsWith("/api/purchases")) {
     const handled = await handlePurchases(req, res, path, method);
     if (handled !== null) return handled;
@@ -3660,7 +3703,7 @@ async function route(req, res) {
 export const api = onRequest(
   {
     region: REGION,
-    secrets: [BOT_TOKEN, PAYMENT_PROVIDER_TOKEN, DRIVER_BOT_TOKEN],
+    secrets: [BOT_TOKEN, PAYMENT_PROVIDER_TOKEN, DRIVER_BOT_TOKEN, MASTER_BOT_TOKEN],
     invoker: "public",
     memory: "256MiB",
     maxInstances: 3,
