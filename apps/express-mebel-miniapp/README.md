@@ -189,6 +189,20 @@ Panel → **Logistika**:
    Tizim manzillarni tartiblaydi: avval 10:00–13:00 oynasi, keyin 14:00–18:00; har oyna ichida ombordan eng yaqinidan.
    Og'irlik yoki qutilar mashinaga sig'masa, ogohlantiradi. Haydovchiga bot xabar yuboradi.
 
+### Haydovchi boti (ro'yxatdan o'tish va ish)
+
+Haydovchilar uchun alohida bot (BotFather'da ochiladi, tokeni `DRIVER_BOT_TOKEN` secret):
+`firebase functions:secrets:set DRIVER_BOT_TOKEN --project <ID>` → `firebase deploy` → `/api/setup` ni oching (javobda `driverBot`).
+
+- **Ro'yxatdan o'tish** botning o'zida: telefon (📱 tugma), ism, mashina rusumi, davlat raqami, yuk ko'tarishi va 8 ta rasm —
+  pasport, prava, texpasport, mashina oldida o'zi, mashina oldidan va orqasidan (raqam ko'rinsin), chap va o'ng yonidan.
+- **HR tasdiqlaydi:** panel → Xodimlar (HR) → **Haydovchi arizalari** → rasmlar va ma'lumotlar → ish turi
+  (**Shtatda** yoki **Alohida/yollanma**) va **💵 Naqd pul olishga ruxsat** (faqat shtatdagiga) → Tasdiqlash yoki sabab bilan Rad etish.
+  Tasdiqlansa, haydovchi va mashinasi tizimga qo'shiladi. Keyin HR xodimni bosib, ish turi va naqd ruxsatini o'zgartira oladi.
+- **Naqd ruxsati yo'q** haydovchiga tizim naqd to'lovli buyurtmani reysga biriktirmaydi: faqat oldindan to'langanlar.
+- **Ish chatda:** reys xabari keladi → «▶️ Reysni boshlash» → manzillar birma-bir (📞, 📍, ✅ Topshirdim, ❌ Topshirib bo'lmadi);
+  naqdda bot "qancha oldingiz?" deb so'raydi; oxirida "sizda naqd: … — kassaga topshiring".
+
 Haydovchi Telegram ilovada **☰ → 🚚 Reyslarim**:
 - manzillar tartib bilan: mijoz, telefon (bosib qo'ng'iroq), manzil, qavat/lift, qutilar, olinadigan naqd pul;
 - **📍 Xarita** va **🗺 Butun marshrut** — Google Maps'da yo'l;

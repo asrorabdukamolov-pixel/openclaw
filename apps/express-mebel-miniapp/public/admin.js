@@ -1057,9 +1057,9 @@ views.logistics = async (page, tools) => {
       <div class="card"><h3>📦 Reys tuzish</h3>
         ${
           free.length
-            ? `<ul class="list" id="freeList">${free.map((o) => `<li><label class="check" style="flex:1"><input type="checkbox" data-pick="${o.id}" checked /> <span><b>${no(o)}</b> ${esc(o.name)} · ${esc((o.deliveryLabel || "").split(", ").at(-1))}<br><span class="muted">${esc(o.address || "")} · ${o.boxes} quti${o.weight ? ` · ${kg(o.weight)}` : ""}</span></span></label>${pill(orderState(o))}</li>`).join("")}</ul>
+            ? `<ul class="list" id="freeList">${free.map((o) => `<li><label class="check" style="flex:1"><input type="checkbox" data-pick="${o.id}" checked /> <span><b>${no(o)}</b> ${esc(o.name)} · ${esc((o.deliveryLabel || "").split(", ").at(-1))}<br><span class="muted">${esc(o.address || "")} · ${o.boxes} quti${o.weight ? ` · ${kg(o.weight)}` : ""}${o.toCollect ? ` · 💵 naqd ${sum(o.toCollect)}` : " · 💳 to'langan"}</span></span></label>${pill(orderState(o))}</li>`).join("")}</ul>
                <div class="row2" style="margin-top:12px">
-                 <label class="field">Haydovchi<select id="rDriver">${plan.drivers.map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join("")}</select></label>
+                 <label class="field">Haydovchi<select id="rDriver">${plan.drivers.map((d) => `<option value="${d.id}">${esc(d.name)}${d.cashAllowed ? " · 💵 naqd" : " · faqat onlayn"}</option>`).join("")}</select></label>
                  <label class="field">Mashina<select id="rVehicle">${vehicles.map((v) => `<option value="${v.id}">${esc([v.name, v.plate].filter(Boolean).join(" · "))}</option>`).join("")}</select></label>
                </div>
                <p class="muted" id="rLoad"></p>
@@ -1074,15 +1074,18 @@ views.logistics = async (page, tools) => {
       <div class="card"><h3>🚐 Mashinalar</h3><ul class="list">${
         plan.vehicles.map((v) => `<li data-vehicle="${v.id}" style="cursor:pointer"><span><b>${esc(v.name)}</b> ${esc(v.plate)}<br><span class="muted">${v.capacityKg ? kg(v.capacityKg) : "sig'imi kiritilmagan"}${v.capacityBoxes ? ` · ${v.capacityBoxes} quti` : ""}</span></span>${v.active === false ? pill(["O'chirilgan", ""]) : pill(["Faol", "ok"])}</li>`).join("") || '<li class="muted">Hali mashina yo\'q</li>'
       }</ul><button class="btn btn--ghost" type="button" id="newVehicle" style="margin-top:10px">＋ Mashina</button></div>
-      <div class="card"><h3>👷 Haydovchilar</h3><ul class="list">${plan.drivers.map((d) => `<li><span><b>${esc(d.name)}</b>${d.username ? ` <span class="muted">@${esc(d.username)}</span>` : ""}</span></li>`).join("") || '<li class="muted">Hali haydovchi yo\'q</li>'}</ul>
-        <p class="muted" style="margin-top:10px">Haydovchi qo'shish: Xodimlar (HR) → ＋ Haydovchini taklif qilish. Haydovchi reyslarini Telegram ilovada ☰ → 🚚 Reyslarim'da ko'radi.</p></div>
+      <div class="card"><h3>👷 Haydovchilar</h3><ul class="list">${plan.drivers.map((d) => `<li><span><b>${esc(d.name)}</b>${d.username ? ` <span class="muted">@${esc(d.username)}</span>` : ""}<br><span class="muted">${esc(DRIVER_TRUST(d))}</span></span></li>`).join("") || '<li class="muted">Hali haydovchi yo\'q</li>'}</ul>
+        <p class="muted" style="margin-top:10px">Yangi haydovchilar haydovchi botida ro'yxatdan o'tadi, HR Xodimlar bo'limida tasdiqlaydi. Reyslar haydovchi botiga va ilovadagi ☰ → 🚚 Reyslarim'ga keladi.</p></div>
     </div>`;
   const picked = () => [...page.querySelectorAll("[data-pick]:checked")].map((x) => byOrder.get(x.dataset.pick));
   const showLoad = () => {
     const el = $("#rLoad");
     if (!el) return;
     const load = routeLoad(picked());
-    el.innerHTML = `Tanlandi: ${picked().length} ta · ${load.boxes} quti · ${kg(load.weight)}${load.unknown ? ` (${load.unknown} tasida og'irlik kiritilmagan)` : ""}${capacityNote(load, vehicles.find((v) => v.id === $("#rVehicle").value))}`;
+    const driver = plan.drivers.find((d) => d.id === $("#rDriver").value);
+    const cash = picked().filter((o) => o.toCollect > 0);
+    const cashNote = driver && !driver.cashAllowed && cash.length ? `<p class="note">⚠️ ${esc(driver.name)} naqd pul ololmaydi: ${cash.map(no).join(", ")} naqd to'lovli. Ularni olib tashlang yoki naqd ruxsati bor haydovchini tanlang.</p>` : "";
+    el.innerHTML = `Tanlandi: ${picked().length} ta · ${load.boxes} quti · ${kg(load.weight)}${load.unknown ? ` (${load.unknown} tasida og'irlik kiritilmagan)` : ""}${capacityNote(load, vehicles.find((v) => v.id === $("#rVehicle").value))}${cashNote}`;
   };
   showLoad();
   page.onchange = showLoad;
@@ -1238,13 +1241,96 @@ function bannerForm(b) {
   });
 }
 
+// ---------- HR: driver applications and trust ----------
+// Contract drivers carry prepaid orders only; HR may let a staff driver collect cash.
+const DRIVER_TRUST = (m) =>
+  m.employment === "staff" ? `Shtatda · ${m.cashAllowed ? "💵 naqd ruxsat" : "faqat onlayn to'lov"}` : m.employment === "contract" ? "Alohida · faqat onlayn to'lov" : "HR qarori kerak · faqat onlayn to'lov";
+
+const docPhotos = (photos = {}) =>
+  `<div class="doc-photos">${[["withCar", "Mashina oldida"], ["passport", "Pasport"], ["license", "Prava"], ["techpass", "Texpasport"], ["carFront", "Oldi (raqam)"], ["carBack", "Orqasi (raqam)"], ["carLeft", "Chap yoni"], ["carRight", "O'ng yoni"]]
+    .map(([k, label]) => (photos[k] ? `<a href="${esc(photos[k])}" target="_blank" rel="noopener"><img src="${esc(photos[k])}" alt="${label}"/><small>${label}</small></a>` : ""))
+    .join("")}</div>`;
+
+const trustFields = (m) => `
+  <div style="display:grid;gap:6px;margin-top:14px"><b>Ish turi</b>
+    <label class="check"><input type="radio" name="employment" value="staff" ${m.employment === "staff" ? "checked" : ""}/> Shtatda (kompaniya xodimi)</label>
+    <label class="check"><input type="radio" name="employment" value="contract" ${m.employment !== "staff" ? "checked" : ""}/> Alohida (yollanma, o'z mashinasi bilan)</label>
+  </div>
+  <label class="check" style="margin-top:8px"><input type="checkbox" name="cashAllowed" ${m.cashAllowed ? "checked" : ""} ${m.employment === "staff" ? "" : "disabled"}/> 💵 Naqd pul olishga ruxsat (naqd to'lovli buyurtmalar biriktiriladi)</label>
+  <p class="muted">Naqd ruxsatini faqat shtatdagi va ishonchli haydovchiga bering. Ruxsatsiz haydovchiga tizim faqat oldindan to'langan buyurtmalarni biriktiradi.</p>`;
+
+function bindTrust(form) {
+  const sync = () => {
+    const staffJob = form.querySelector("[name=employment]:checked")?.value === "staff";
+    const cash = form.querySelector("[name=cashAllowed]");
+    cash.disabled = !staffJob;
+    if (!staffJob) cash.checked = false;
+  };
+  form.onchange = sync;
+  sync();
+  return () => ({ employment: form.querySelector("[name=employment]:checked").value, cashAllowed: form.querySelector("[name=cashAllowed]").checked });
+}
+
+function applicationDrawer(a) {
+  openDrawer("Haydovchi arizasi", (body) => {
+    body.innerHTML = `${docPhotos(a.photos)}
+      <dl class="specs" style="margin-top:14px">
+        <dt>Ism</dt><dd>${esc(a.name)}</dd><dt>Telefon</dt><dd>${esc(a.phone)}${a.username ? ` · @${esc(a.username)}` : ""}</dd>
+        <dt>Mashina</dt><dd>${esc(a.car)} · ${esc(a.plate)} · ${a.capacityKg} kg</dd><dt>Yuborilgan</dt><dd>${when(a.submittedAt)}</dd>
+      </dl>
+      <form id="trustForm">${trustFields({ employment: "contract" })}</form>
+      <div class="stack" style="margin-top:14px"><button class="btn" type="button" id="appOk">✅ Tasdiqlash</button></div>
+      <div class="stack" style="margin-top:10px"><input class="input" id="rejectReason" placeholder="Rad etish sababi" style="flex:1"/><button class="btn btn--ghost" type="button" id="appNo">Rad etish</button></div>`;
+    const trust = bindTrust($("#trustForm", body));
+    const act = (path, payload) => async () => {
+      try {
+        await api(`/api/driver-applications/${a.id}/${path}`, { method: "POST", body: payload() });
+        toast(path === "approve" ? "Qabul qilindi, haydovchiga xabar ketdi" : "Rad etildi");
+        closeDrawer();
+        render();
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+    $("#appOk", body).onclick = act("approve", trust);
+    $("#appNo", body).onclick = act("reject", () => ({ reason: $("#rejectReason", body).value }));
+  });
+}
+
+function driverDrawer(m) {
+  openDrawer(m.name, (body) => {
+    body.innerHTML = `${m.photos ? docPhotos(m.photos) : ""}
+      <dl class="specs" style="margin-top:14px"><dt>Telefon</dt><dd>${esc(m.phone || "—")}${m.username ? ` · @${esc(m.username)}` : ""}</dd><dt>Holat</dt><dd>${esc(DRIVER_TRUST(m))}</dd><dt>Qo'shilgan</dt><dd>${when(m.addedAt)}${m.approvedBy ? ` · ${esc(m.approvedBy)}` : ""}</dd></dl>
+      <form id="trustForm">${trustFields(m)}</form>
+      <button class="btn" type="button" id="trustSave" style="margin-top:12px">Saqlash</button>`;
+    const trust = bindTrust($("#trustForm", body));
+    $("#trustSave", body).onclick = async () => {
+      try {
+        await api(`/api/staff/${m.id}/trust`, { method: "PUT", body: trust() });
+        toast("Saqlandi");
+        closeDrawer();
+        render();
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+  });
+}
+
 views.staff = async (page, tools) => {
   tools.innerHTML = '<button class="btn" type="button" data-invite="warehouse">＋ Omborchini taklif qilish</button><button class="btn btn--dark" type="button" data-invite="driver">＋ Haydovchini taklif qilish</button>';
-  const [staff, screens] = await Promise.all([api("/api/staff"), api("/api/screens")]);
+  const [staff, screens, apps] = await Promise.all([api("/api/staff"), api("/api/screens"), api("/api/driver-applications")]);
   page.innerHTML = `
+    ${
+      apps.length
+        ? `<div class="card" style="margin-bottom:16px"><h3>🆕 Haydovchi arizalari (${apps.length})</h3><ul class="list">${apps
+            .map((a) => `<li data-app="${a.id}" style="cursor:pointer"><span style="display:flex;gap:12px;align-items:center"><img class="thumb" src="${esc(a.photos?.withCar)}" alt=""/><span><b>${esc(a.name)}</b> · ${esc(a.phone)}<br><span class="muted">${esc(a.car)} · ${esc(a.plate)} · ${a.capacityKg} kg · ${when(a.submittedAt)}</span></span></span>${pill(["Ko'rib chiqish", "warn"])}</li>`)
+            .join("")}</ul></div>`
+        : ""
+    }
     <div class="grid cols-2">
       <div class="card"><h3>Xodimlar (${staff.length})</h3><ul class="list">${
-        staff.map((m) => `<li><span><b>${esc(m.name)}</b>${m.username ? ` <span class="muted">@${esc(m.username)}</span>` : ""}<br><span class="muted">${m.role === "driver" ? "Haydovchi" : "Omborchi"} · qo'shilgan ${when(m.addedAt)}</span></span><button class="btn btn--ghost" data-remove="${m.id}" data-name="${esc(m.name)}">O'chirish</button></li>`).join("") ||
+        staff.map((m) => `<li ${m.role === "driver" ? `data-driver="${m.id}" style="cursor:pointer"` : ""}><span><b>${esc(m.name)}</b>${m.username ? ` <span class="muted">@${esc(m.username)}</span>` : ""}<br><span class="muted">${m.role === "driver" ? `Haydovchi · ${DRIVER_TRUST(m)}` : "Omborchi"} · qo'shilgan ${when(m.addedAt)}</span></span><button class="btn btn--ghost" data-remove="${m.id}" data-name="${esc(m.name)}">O'chirish</button></li>`).join("") ||
         '<li class="muted">Hali xodim yo\'q</li>'
       }</ul><p class="muted" style="margin-top:10px">Adminlar: ${state.info.admins} ta (deploy sozlamasida).</p></div>
       <div class="card"><h3>Ombor ekranlari (${screens.length})</h3><ul class="list">${
@@ -1268,8 +1354,12 @@ views.staff = async (page, tools) => {
     }
   };
   page.onclick = async (e) => {
+    const app = e.target.closest("[data-app]");
+    if (app) return applicationDrawer(apps.find((a) => a.id === app.dataset.app));
     const rm = e.target.closest("[data-remove]");
     const un = e.target.closest("[data-unpair]");
+    const drv = e.target.closest("[data-driver]");
+    if (drv && !rm) return driverDrawer(staff.find((m) => m.id === drv.dataset.driver));
     const target = rm || un;
     if (!target || !window.confirm(`«${target.dataset.name}» ${rm ? "o'chirilsinmi" : "uzilsinmi"}?`)) return;
     try {

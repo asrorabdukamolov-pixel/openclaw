@@ -20,6 +20,8 @@ import { defineSecret, defineString } from "firebase-functions/params";
 
 const BOT_TOKEN = defineSecret("BOT_TOKEN");
 const PAYMENT_PROVIDER_TOKEN = defineSecret("PAYMENT_PROVIDER_TOKEN");
+// The drivers' own bot (registration and route work); a separate BotFather bot.
+const DRIVER_BOT_TOKEN = defineSecret("DRIVER_BOT_TOKEN");
 const ADMIN_IDS = defineString("ADMIN_IDS", { description: "Admin Telegram user ids, comma-separated" });
 const ORDERS_CHAT_ID = defineString("ORDERS_CHAT_ID", {
   default: "-",
@@ -40,6 +42,7 @@ const adminLoginsCol = db.collection("adminLogins");
 const adminSessionsCol = db.collection("adminSessions");
 const vehiclesCol = db.collection("vehicles");
 const routesCol = db.collection("routes");
+const applicationsCol = db.collection("driverApplications");
 const countersRef = db.collection("meta").doc("counters");
 const deliveryRef = db.collection("meta").doc("delivery");
 const segmentsRef = db.collection("meta").doc("segments");
@@ -92,11 +95,15 @@ function isOwnImage(src) {
 async function saveImage(dataUrl) {
   const m = /^data:image\/(jpeg|png|webp);base64,(.+)$/.exec(String(dataUrl || ""));
   if (!m) throw new HttpError(400, "Faqat JPG, PNG yoki WEBP rasm");
+  return saveBuffer(Buffer.from(m[2], "base64"), `images/${randomUUID()}.${m[1] === "jpeg" ? "jpg" : m[1]}`, `image/${m[1]}`);
+}
+
+// Stored files are read through their unguessable download-token URL, never listed publicly.
+async function saveBuffer(buffer, path, contentType) {
   const bucket = getStorage().bucket();
-  const path = `images/${randomUUID()}.${m[1] === "jpeg" ? "jpg" : m[1]}`;
   const token = randomUUID();
-  await bucket.file(path).save(Buffer.from(m[2], "base64"), {
-    contentType: `image/${m[1]}`,
+  await bucket.file(path).save(buffer, {
+    contentType,
     metadata: {
       cacheControl: "public, max-age=31536000, immutable",
       metadata: { firebaseStorageDownloadTokens: token },
@@ -405,8 +412,10 @@ async function requireRole(req, ...roles) {
   return auth;
 }
 
-async function tg(method, body) {
-  const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN.value()}/${method}`, {
+const tg = (method, body) => callTelegram(BOT_TOKEN.value(), method, body);
+
+async function callTelegram(token, method, body) {
+  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -857,7 +866,7 @@ async function handleSetup(res) {
     // Most often a wrong BOT_TOKEN: Telegram answers "Unauthorized".
     throw new HttpError(502, `Telegram bilan ulanib bo'lmadi (${err.message}). BOT_TOKEN ni tekshiring.`);
   }
-  res.json({ ok: true, bot: `@${bot.username}`, webapp: WEBAPP_URL, webhook, seeded });
+  res.json({ ok: true, bot: `@${bot.username}`, driverBot: await setupDriverBot(), webapp: WEBAPP_URL, webhook, seeded });
 }
 
 const FIRST_SKU = 100000;
@@ -2109,10 +2118,7 @@ async function handleDuePaid(pay) {
   });
   const route = o.routeId ? (await routesCol.doc(o.routeId).get()).data() : null;
   if (!route) return;
-  await tg("sendMessage", {
-    chat_id: route.driverId,
-    text: `✅ ${ORDER_LABEL(o)}: ${formatSum(o.dueRequest.amount)} karta bilan to'landi. Mebelni topshirishingiz mumkin.`,
-  }).catch((err) => logger.warn("due paid notice failed", err));
+  await notifyDriver(route.driverId, `✅ ${ORDER_LABEL(o)}: ${formatSum(o.dueRequest.amount)} karta bilan to'landi. «✅ Topshirdim» ni bosing.`);
 }
 
 // After every stop: warn the next buyer the driver is coming, or close the route with a cash report.
@@ -2146,6 +2152,384 @@ async function advanceRoute(routeId) {
       : "",
   ];
   await tg("sendMessage", { chat_id: ordersChat(), text: lines.filter(Boolean).join("\n") }).catch((err) => logger.warn("route done notice failed", err));
+}
+
+// ---------- driver bot: registration, HR approval and route work in chat ----------
+// A second bot only for drivers. Applicants register in chat (phone, car, photos); HR approves them
+// in the panel, choosing staff ("shtatda") or contract work and whether the driver may take cash.
+// Approved drivers start routes and close stops with chat buttons. Telegram user ids are the same
+// in both bots, so an approved driver is the same `staff` document the mini app already knows.
+
+// HR checks the person and the vehicle: documents, the driver standing by the car, and all four
+// sides of the car with the plate readable front and back.
+const REG_PHOTOS = {
+  passport: "Pasport",
+  license: "Haydovchilik guvohnomasi (prava)",
+  techpass: "Mashina texpasporti",
+  withCar: "Mashina oldida o'zingiz",
+  carFront: "Mashina oldidan (raqam ko'rinsin)",
+  carBack: "Mashina orqasidan (raqam ko'rinsin)",
+  carLeft: "Mashina chap yonidan",
+  carRight: "Mashina o'ng yonidan",
+};
+const REG_STEPS = ["phone", "name", "car", "plate", "capacity", ...Object.keys(REG_PHOTOS), "confirm"];
+const REG_PROMPTS = {
+  name: "Ism va familiyangizni yozing (pasportdagidek):",
+  car: "Mashinangiz rusumi (masalan: Isuzu NPR, Labo, Damas):",
+  plate: "Mashinaning davlat raqami (masalan: 01 A 123 BC):",
+  capacity: "Yuk ko'tarishi, kg (taxminan, masalan: 1500):",
+  passport: "🛂 Pasportingizning rasmli sahifasini yuboring (1/8):",
+  license: "🪪 Haydovchilik guvohnomasi (prava) rasmini yuboring (2/8):",
+  techpass: "📄 Mashina texpasporti rasmini yuboring (3/8):",
+  withCar: "🤳 Mashinangiz oldida turib tushgan rasmingizni yuboring: yuzingiz va mashina aniq ko'rinsin (4/8):",
+  carFront: "🚚 Mashinani OLDIDAN rasmga oling, davlat raqami aniq o'qilsin (5/8):",
+  carBack: "🚚 Mashinani ORQASIDAN rasmga oling, davlat raqami aniq o'qilsin (6/8):",
+  carLeft: "🚚 Mashinani CHAP yonidan rasmga oling (7/8):",
+  carRight: "🚚 Mashinani O'NG yonidan rasmga oling (8/8):",
+};
+const DRIVER_MENU = { keyboard: [[{ text: "📋 Reyslarim" }]], resize_keyboard: true };
+const EMPLOYMENT = { staff: "Shtatda", contract: "Alohida (yollanma)" };
+
+const driverWebhookSecret = () => createHmac("sha256", DRIVER_BOT_TOKEN.value()).update("driver-webhook").digest("hex");
+const dtg = (method, body) => callTelegram(DRIVER_BOT_TOKEN.value(), method, body);
+
+// Drivers added by invite link before the driver bot existed may never have started it.
+async function notifyDriver(driverId, text, extra = {}) {
+  try {
+    await dtg("sendMessage", { chat_id: driverId, text, ...extra });
+  } catch {
+    await tg("sendMessage", { chat_id: driverId, text }).catch((err) => logger.warn("driver notice failed", err));
+  }
+}
+
+async function saveTelegramPhoto(fileId, path) {
+  const file = await dtg("getFile", { file_id: fileId });
+  const res = await fetch(`https://api.telegram.org/file/bot${DRIVER_BOT_TOKEN.value()}/${file.file_path}`);
+  if (!res.ok) throw new Error(`photo download ${res.status}`);
+  return saveBuffer(Buffer.from(await res.arrayBuffer()), `${path}.jpg`, "image/jpeg");
+}
+
+function regSummary(a) {
+  return [
+    "Arizangizni tekshiring:",
+    `👤 ${a.name}`,
+    `📱 ${a.phone}`,
+    `🚚 ${a.car} · ${a.plate} · ${a.capacityKg} kg`,
+    `📷 ${Object.keys(REG_PHOTOS).length} ta rasm: pasport, prava, texpasport, mashina oldida o'zingiz va mashinaning 4 tomoni`,
+  ].join("\n");
+}
+
+async function regPrompt(chatId, step, a) {
+  if (step === "phone") {
+    return dtg("sendMessage", {
+      chat_id: chatId,
+      text: "Assalomu alaykum! Express Market'ga haydovchi bo'lib ishlash uchun ro'yxatdan o'ting.\n\nAvval telefon raqamingizni ulashing 👇",
+      reply_markup: { keyboard: [[{ text: "📱 Raqamni ulashish", request_contact: true }]], resize_keyboard: true, one_time_keyboard: true },
+    });
+  }
+  if (step === "confirm") {
+    return dtg("sendMessage", {
+      chat_id: chatId,
+      text: regSummary(a),
+      reply_markup: { inline_keyboard: [[{ text: "✅ Yuborish", callback_data: "reg:send" }, { text: "🔄 Qaytadan", callback_data: "reg:redo" }]] },
+    });
+  }
+  return dtg("sendMessage", { chat_id: chatId, text: REG_PROMPTS[step], reply_markup: { remove_keyboard: true } });
+}
+
+// One step of the registration form; returns the field update or an error to show.
+function regAnswer(step, msg) {
+  const text = String(msg.text || "").trim();
+  if (step === "phone") {
+    if (!msg.contact || msg.contact.user_id !== msg.from.id) return { error: "Pastdagi «📱 Raqamni ulashish» tugmasini bosing." };
+    return { phone: `+${String(msg.contact.phone_number).replace(/\D/g, "")}` };
+  }
+  if (step === "name") return text.length >= 3 && text.length <= 80 ? { name: text } : { error: "Ism va familiyani to'liq yozing." };
+  if (step === "car") return text.length >= 2 && text.length <= 60 ? { car: text } : { error: "Mashina rusumini yozing." };
+  if (step === "plate") return text.length >= 4 && text.length <= 20 ? { plate: text.toUpperCase() } : { error: "Davlat raqamini yozing." };
+  if (step === "capacity") {
+    const kg = Math.round(Number(text.replace(/\D/g, "")));
+    return kg >= 100 && kg <= 50000 ? { capacityKg: kg } : { error: "Faqat raqam yozing, masalan 1500." };
+  }
+  const photo = msg.photo?.at(-1)?.file_id ?? (msg.document?.mime_type?.startsWith("image/") ? msg.document.file_id : null);
+  return photo ? { [`${step}FileId`]: photo } : { error: `${REG_PHOTOS[step]} rasmini yuboring.` };
+}
+
+async function handleRegistration(msg) {
+  const ref = applicationsCol.doc(String(msg.from.id));
+  const snap = await ref.get();
+  const a = snap.data();
+  const restart = msg.text === "/start" && (!a || a.status === "rejected" || a.status === "draft");
+  if (!a || restart) {
+    await ref.set({ telegramId: msg.from.id, username: msg.from.username || "", step: "phone", status: "draft", createdAt: Date.now() });
+    return regPrompt(msg.chat.id, "phone");
+  }
+  if (a.status === "pending") return dtg("sendMessage", { chat_id: msg.chat.id, text: "⏳ Arizangiz HR bo'limida ko'rib chiqilmoqda. Javob shu yerga keladi." });
+  if (a.step === "confirm") return regPrompt(msg.chat.id, "confirm", a);
+  const answer = regAnswer(a.step, msg);
+  if (answer.error) return dtg("sendMessage", { chat_id: msg.chat.id, text: answer.error });
+  const step = REG_STEPS[REG_STEPS.indexOf(a.step) + 1];
+  await ref.update({ ...answer, step });
+  return regPrompt(msg.chat.id, step, { ...a, ...answer });
+}
+
+async function submitApplication(from) {
+  const ref = applicationsCol.doc(String(from.id));
+  const a = (await ref.get()).data();
+  if (!a || a.step !== "confirm" || a.status !== "draft") return "Ariza topilmadi, /start bosing";
+  // Photos move to Storage so HR sees them in the panel without the bot token.
+  const photos = {};
+  for (const kind of Object.keys(REG_PHOTOS)) photos[kind] = await saveTelegramPhoto(a[`${kind}FileId`], `drivers/${from.id}/${kind}-${randomUUID()}`);
+  await ref.update({ status: "pending", submittedAt: Date.now(), photos });
+  for (const admin of idList(ADMIN_IDS.value())) {
+    await tg("sendMessage", {
+      chat_id: admin,
+      text: `🆕 Haydovchi arizasi: ${a.name}, ${a.phone}, ${a.car} ${a.plate}.\nPanel → Xodimlar (HR) → Haydovchi arizalari.`,
+    }).catch((err) => logger.warn("application notice failed", err));
+  }
+  await dtg("sendMessage", { chat_id: from.id, text: "✅ Arizangiz yuborildi. HR bo'limi tekshirib, shu yerga javob beradi." });
+  return "Yuborildi";
+}
+
+// ---------- driver work in chat ----------
+
+const routeMapUrl = (stops) => {
+  const pts = stops.filter((s) => s.location).map((s) => `${s.location.lat},${s.location.lon}`);
+  return pts.length ? `https://www.google.com/maps/dir/${pts.join("/")}` : null;
+};
+const openStops = (r) => r.stops.filter((s) => s.stage === "shipped" && !s.handedAt && s.routeId === r.id);
+const stillDue = (s) => Math.max(0, s.toCollect - (s.dueRequest?.status === "paid" ? s.dueRequest.amount : 0));
+
+function stopText(s, i) {
+  const floor = s.floor ? ` · ${s.floor}-qavat${s.lift ? ", lift bor" : s.floor > 2 ? ", liftsiz" : ""}` : "";
+  return [
+    `${i + 1}. #${s.number} · ${s.name} · ${String(s.deliveryLabel || "").split(", ").at(-1)}`,
+    `📞 ${s.phone}`,
+    `🏠 ${s.address || "manzil yozilmagan"}${floor}`,
+    s.comment ? `💬 ${s.comment}` : "",
+    `📦 ${s.lines.join(", ")} · ${s.boxes} quti`,
+    stillDue(s) ? `💵 Olinadi: ${formatSum(stillDue(s))}` : "💳 To'langan",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function stopButtons(s) {
+  const rows = [[{ text: "✅ Topshirdim", callback_data: `ds:h:${s.id}` }, { text: "❌ Topshirib bo'lmadi", callback_data: `ds:f:${s.id}` }]];
+  if (s.location) rows.push([{ text: "📍 Xaritada", url: `https://maps.google.com/?q=${s.location.lat},${s.location.lon}` }]);
+  return { inline_keyboard: rows };
+}
+
+async function sendRoutes(chatId, user) {
+  const routes = (await driverRoutes(user)).filter((r) => r.status !== "done");
+  if (!routes.length) return dtg("sendMessage", { chat_id: chatId, text: "Hozircha sizga reys biriktirilmagan. Reys tuzilganda shu yerga xabar keladi.", reply_markup: DRIVER_MENU });
+  for (const r of routes) {
+    const cash = r.stops.reduce((n, s) => n + stillDue(s), 0);
+    const rows = r.status === "planned" ? [[{ text: "▶️ Reysni boshlash", callback_data: `dr:start:${r.id}` }]] : [[{ text: "📍 Navbatdagi manzil", callback_data: `dr:next:${r.id}` }]];
+    const map = routeMapUrl(r.status === "planned" ? r.stops : openStops(r));
+    if (map) rows.push([{ text: "🗺 Butun marshrut", url: map }]);
+    await dtg("sendMessage", {
+      chat_id: chatId,
+      text: `🚚 ${r.dateLabel} · ${ROUTE_STATUS_TEXT[r.status]}\n${r.vehicleName} · ${r.stops.length} ta manzil${r.km ? ` · ~${r.km} km` : ""}${cash ? `\n💵 Jami naqd: ${formatSum(cash)}` : ""}\n\n${r.stops.map((s, i) => `${i + 1}. #${s.number} ${s.name} — ${String(s.address || "").slice(0, 40)}`).join("\n")}`,
+      reply_markup: { inline_keyboard: rows },
+    });
+  }
+}
+const ROUTE_STATUS_TEXT = { planned: "Rejada", started: "Yo'lda", done: "Tugadi" };
+
+// Shows the next open stop of the route, or the end-of-route note with the cash to hand in.
+async function sendNextStop(chatId, user, routeId) {
+  const route = (await driverRoutes(user)).find((r) => r.id === routeId);
+  if (!route) return dtg("sendMessage", { chat_id: chatId, text: "Reys topilmadi." });
+  const open = openStops(route);
+  if (open.length) return dtg("sendMessage", { chat_id: chatId, text: stopText(open[0], route.stops.indexOf(open[0])), reply_markup: stopButtons(open[0]) });
+  const cash = route.stops.filter((s) => s.handedAt && s.routeId === route.id).length;
+  const done = (await routesCol.doc(routeId).get()).data();
+  const snaps = await db.getAll(...done.orderIds.map((id) => ordersCol.doc(id)));
+  const collected = snaps.reduce((n, x) => n + (x.data()?.routeId === routeId ? (x.data().cashCollected ?? 0) : 0), 0);
+  return dtg("sendMessage", {
+    chat_id: chatId,
+    text: `🏁 Reys tugadi: ${cash} ta topshirildi.${collected ? `\n💵 Sizda naqd: ${formatSum(collected)} — kassaga topshiring.` : ""}`,
+    reply_markup: DRIVER_MENU,
+  });
+}
+
+async function driverFromUpdate(from) {
+  const staff = (await staffCol.doc(String(from.id)).get()).data();
+  return staff?.role === "driver" ? staff : null;
+}
+
+async function handleDriverText(msg, staff) {
+  const user = msg.from;
+  const awaiting = staff.awaitingCash;
+  if (awaiting && /^[\d\s']+$/.test(String(msg.text || "").trim())) {
+    const cash = Number(String(msg.text).replace(/\D/g, ""));
+    await staffCol.doc(String(user.id)).update({ awaitingCash: null });
+    return closeStop(msg.chat.id, user, awaiting, () => handOver(awaiting, user, { cash }), cash);
+  }
+  return sendRoutes(msg.chat.id, user);
+}
+
+// Runs one stop action and answers in chat; a short-cash refusal offers the card top-up instead.
+async function closeStop(chatId, user, orderId, action, cash) {
+  const routeId = (await ordersCol.doc(orderId).get()).data()?.routeId;
+  try {
+    await action();
+  } catch (err) {
+    const short = err instanceof HttpError && err.status === 409 && cash !== undefined;
+    const rows = short
+      ? [[...(cardsEnabled() ? [{ text: "💳 Qolganini karta bilan", callback_data: `ds:c:${orderId}:${cash}` }] : []), { text: "❌ Topshirib bo'lmadi", callback_data: `ds:f:${orderId}` }]]
+      : [];
+    return dtg("sendMessage", { chat_id: chatId, text: `⚠️ ${err.message}`, ...(rows.length ? { reply_markup: { inline_keyboard: rows } } : {}) });
+  }
+  if (routeId) await sendNextStop(chatId, user, routeId);
+}
+
+async function handleDriverCallback(q) {
+  const user = q.from;
+  const chatId = q.message?.chat.id ?? user.id;
+  const answer = (text = "") => dtg("answerCallbackQuery", { callback_query_id: q.id, text }).catch(() => {});
+  if (q.data === "reg:send") return answer(await submitApplication(user));
+  if (q.data === "reg:redo") {
+    await applicationsCol.doc(String(user.id)).update({ step: "phone", status: "draft" });
+    await answer();
+    return regPrompt(chatId, "phone");
+  }
+  const staff = await driverFromUpdate(user);
+  if (!staff) return answer("Avval ro'yxatdan o'ting: /start");
+  const [kind, act, id, extra] = String(q.data).split(":");
+  await answer();
+  try {
+    if (kind === "dr" && act === "start") {
+      await startRoute(id, user);
+      return sendNextStop(chatId, user, id);
+    }
+    if (kind === "dr" && act === "next") return sendNextStop(chatId, user, id);
+    if (kind === "dr" && act === "list") return sendRoutes(chatId, user);
+  } catch (err) {
+    return dtg("sendMessage", { chat_id: chatId, text: `⚠️ ${err.message}` });
+  }
+  if (kind !== "ds") return;
+  const o = (await ordersCol.doc(id).get()).data();
+  if (act === "h") {
+    const due = o ? amountDue(o) - (o.dueRequest?.status === "paid" ? o.dueRequest.amount : 0) : 0;
+    if (due > 0) {
+      await staffCol.doc(String(user.id)).update({ awaitingCash: id });
+      return dtg("sendMessage", { chat_id: chatId, text: `💵 #${o.number}: qancha naqd oldingiz? Faqat raqam yozing.\nKerak: ${formatSum(due)}` });
+    }
+    return closeStop(chatId, user, id, () => handOver(id, user, {}));
+  }
+  if (act === "f") {
+    return dtg("editMessageReplyMarkup", {
+      chat_id: chatId,
+      message_id: q.message.message_id,
+      reply_markup: { inline_keyboard: Object.entries(FAIL_REASONS).map(([k, label]) => [{ text: label, callback_data: `ds:r:${id}:${k}` }]) },
+    }).catch(() => dtg("sendMessage", { chat_id: chatId, text: "Sababni tanlang:", reply_markup: { inline_keyboard: Object.entries(FAIL_REASONS).map(([k, label]) => [{ text: label, callback_data: `ds:r:${id}:${k}` }]) } }));
+  }
+  if (act === "r") return closeStop(chatId, user, id, () => failStop(id, user, { reason: extra }));
+  if (act === "c") {
+    try {
+      await requestCardDue(id, user, { cash: Number(extra) });
+      await staffCol.doc(String(user.id)).update({ awaitingCash: null });
+      return dtg("sendMessage", { chat_id: chatId, text: "💳 Mijozga to'lov havolasi yuborildi. To'lov o'tganda xabar keladi, keyin «✅ Topshirdim» ni bosing va olgan naqdingizni yozing." });
+    } catch (err) {
+      return dtg("sendMessage", { chat_id: chatId, text: `⚠️ ${err.message}` });
+    }
+  }
+}
+
+async function handleDriverBot(req, res) {
+  const header = req.get("x-telegram-bot-api-secret-token") || "";
+  if (!sameSecret(header, driverWebhookSecret())) throw new HttpError(403, "Forbidden");
+  // Replies are best-effort: an error must not make Telegram resend the update forever.
+  try {
+    if (req.body?.callback_query) await handleDriverCallback(req.body.callback_query);
+    const msg = req.body?.message;
+    if (msg && msg.chat.type === "private") {
+      const staff = await driverFromUpdate(msg.from);
+      if (staff) await handleDriverText(msg, staff);
+      else await handleRegistration(msg);
+    }
+  } catch (err) {
+    logger.error("driver bot update failed", err);
+  }
+  return res.json({ ok: true });
+}
+
+async function setupDriverBot() {
+  try {
+    const bot = await dtg("getMe", {});
+    await dtg("setWebhook", { url: `${WEBAPP_URL}/api/driverbot`, secret_token: driverWebhookSecret(), allowed_updates: ["message", "callback_query"] });
+    await dtg("setMyCommands", { commands: [{ command: "start", description: "Boshlash / ro'yxatdan o'tish" }, { command: "reys", description: "Reyslarim" }] });
+    return `@${bot.username}`;
+  } catch (err) {
+    return `ulanmadi: ${err.message}`;
+  }
+}
+
+// ---------- HR: applications and driver trust ----------
+
+function cleanTrust(input) {
+  const employment = input.employment === "staff" ? "staff" : "contract";
+  // Cash is only for staff drivers HR vouches for; contract drivers carry prepaid orders only.
+  return { employment, cashAllowed: employment === "staff" && input.cashAllowed === true };
+}
+
+async function handleHr(req, res, path, method) {
+  if (path === "/api/driver-applications" && method === "GET") {
+    await requireRole(req, "admin");
+    const snap = await applicationsCol.where("status", "==", "pending").get();
+    return res.json(snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => a.submittedAt - b.submittedAt));
+  }
+  const appMatch = path.match(/^\/api\/driver-applications\/(\d{1,20})\/(approve|reject)$/);
+  if (appMatch && method === "POST") {
+    const { user } = await requireRole(req, "admin");
+    const [, id, action] = appMatch;
+    const ref = applicationsCol.doc(id);
+    const a = (await ref.get()).data();
+    if (a?.status !== "pending") throw new HttpError(409, "Ariza allaqachon ko'rib chiqilgan");
+    if (action === "reject") {
+      const reason = String(req.body?.reason || "").trim().slice(0, 200);
+      if (!reason) throw new HttpError(400, "Rad etish sababini yozing");
+      await ref.update({ status: "rejected", reviewedAt: Date.now(), reviewedBy: staffName(user), rejectReason: reason });
+      await dtg("sendMessage", { chat_id: id, text: `❌ Arizangiz rad etildi: ${reason}\nQayta topshirish uchun /start bosing.` }).catch(() => {});
+      return res.json({ ok: true });
+    }
+    const trust = cleanTrust(req.body || {});
+    const vehicleRef = vehiclesCol.doc();
+    await db.runTransaction(async (t) => {
+      t.set(vehicleRef, { name: a.car, plate: a.plate, capacityKg: a.capacityKg, capacityBoxes: null, active: true, driverId: id, createdAt: Date.now(), updatedAt: Date.now() });
+      t.set(staffCol.doc(id), {
+        role: "driver",
+        name: a.name,
+        username: a.username,
+        phone: a.phone,
+        photos: a.photos,
+        vehicleId: vehicleRef.id,
+        ...trust,
+        addedAt: Date.now(),
+        approvedBy: staffName(user),
+      });
+      t.update(ref, { status: "approved", reviewedAt: Date.now(), reviewedBy: staffName(user), ...trust });
+    });
+    await dtg("sendMessage", {
+      chat_id: id,
+      text: `🎉 Tabriklaymiz, ${a.name}! Siz Express Market haydovchisi sifatida qabul qilindingiz (${EMPLOYMENT[trust.employment].toLowerCase()}).\n${trust.cashAllowed ? "💵 Sizga naqd to'lovli buyurtmalar ham biriktiriladi." : "💳 Sizga oldindan to'langan buyurtmalar biriktiriladi."}\n\nReys tuzilganda shu yerga xabar keladi. «📋 Reyslarim» tugmasi doim pastda.`,
+      reply_markup: DRIVER_MENU,
+    }).catch((err) => logger.warn("approve notice failed", err));
+    return res.json({ ok: true });
+  }
+  const trustMatch = path.match(/^\/api\/staff\/(\d{1,20})\/trust$/);
+  if (trustMatch && method === "PUT") {
+    await requireRole(req, "admin");
+    const ref = staffCol.doc(trustMatch[1]);
+    const staff = (await ref.get()).data();
+    if (staff?.role !== "driver") throw new HttpError(404, "Haydovchi topilmadi");
+    const trust = cleanTrust(req.body || {});
+    await ref.update(trust);
+    return res.json({ ...staff, ...trust });
+  }
+  return null;
 }
 
 async function handleLogistics(req, res, path, method) {
@@ -2203,7 +2587,7 @@ async function handleLogistics(req, res, path, method) {
       returned,
       routes: routeSnap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => a.createdAt - b.createdAt),
       vehicles: vehicleSnap.docs.map((d) => ({ id: d.id, ...d.data() })),
-      drivers: driverSnap.docs.map((d) => ({ id: d.id, name: d.data().name, username: d.data().username })),
+      drivers: driverSnap.docs.map((d) => ({ id: d.id, name: d.data().name, username: d.data().username, employment: d.data().employment ?? null, cashAllowed: d.data().cashAllowed === true, vehicleId: d.data().vehicleId ?? null })),
     });
   }
 
@@ -2235,6 +2619,10 @@ async function handleLogistics(req, res, path, method) {
         if (!date || slotDate(o) !== date) throw new HttpError(400, "Reysdagi hamma buyurtma bitta kunga tegishli bo'lsin");
         if (o.routeId) throw new HttpError(409, `${ORDER_LABEL(o)} boshqa reysda bor`);
       }
+      const cashOrders = orders.filter((o) => amountDue(o) > 0);
+      if (cashOrders.length && driver.data().cashAllowed !== true) {
+        throw new HttpError(409, `${driver.data().name} naqd pul ololmaydi (HR ruxsati yo'q): ${cashOrders.map(ORDER_LABEL).join(", ")} naqd to'lovli. Ularni naqd ruxsati bor haydovchiga biriktiring`);
+      }
       const stops = orderStops(settings.warehouse, orders);
       const v = vehicle.data();
       const data = {
@@ -2253,11 +2641,9 @@ async function handleLogistics(req, res, path, method) {
       for (const o of orders) t.update(ordersCol.doc(o.id), { routeId: ref.id });
       return data;
     });
-    await tg("sendMessage", {
-      chat_id: route.driverId,
-      text: `🚚 Sizga yangi reys: ${dayLabel(new Date(`${route.date}T00:00:00Z`))}, ${route.orderIds.length} ta manzil, ${route.vehicleName}.\nIlovada ☰ → 🚚 Reyslarim.`,
-      reply_markup: { inline_keyboard: [[{ text: "🚚 Reyslarim", web_app: { url: `${WEBAPP_URL}/#reys` } }]] },
-    }).catch((err) => logger.warn("route notice failed", err));
+    await notifyDriver(route.driverId, `🚚 Sizga yangi reys: ${dayLabel(new Date(`${route.date}T00:00:00Z`))}, ${route.orderIds.length} ta manzil, ${route.vehicleName}.`, {
+      reply_markup: { inline_keyboard: [[{ text: "📋 Reysni ko'rish", callback_data: "dr:list" }]] },
+    });
     return res.status(201).json({ id: ref.id, ...route });
   }
   const routeMatch = path.match(/^\/api\/routes\/([\w-]{1,64})$/);
@@ -2301,6 +2687,11 @@ async function route(req, res) {
   const method = req.method;
 
   if (path === "/api/telegram" && method === "POST") return handleTelegramUpdate(req, res);
+  if (path === "/api/driverbot" && method === "POST") return handleDriverBot(req, res);
+  if (path.startsWith("/api/driver-applications") || /^\/api\/staff\/\d+\/trust$/.test(path)) {
+    const handled = await handleHr(req, res, path, method);
+    if (handled !== null) return handled;
+  }
   if (path === "/api/setup" && method === "GET") return handleSetup(res);
 
   if (path === "/api/config" && method === "GET") {
@@ -2662,7 +3053,7 @@ async function route(req, res) {
 export const api = onRequest(
   {
     region: REGION,
-    secrets: [BOT_TOKEN, PAYMENT_PROVIDER_TOKEN],
+    secrets: [BOT_TOKEN, PAYMENT_PROVIDER_TOKEN, DRIVER_BOT_TOKEN],
     invoker: "public",
     memory: "256MiB",
     maxInstances: 3,

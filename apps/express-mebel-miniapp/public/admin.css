@@ -702,3 +702,26 @@ dl.specs dd {
   color: var(--white);
   font-weight: 600;
 }
+
+/* HR: driver document photos, opened full size in a new tab. */
+.doc-photos {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+}
+
+.doc-photos a {
+  display: grid;
+  gap: 4px;
+  color: var(--muted, #8a8987);
+  text-decoration: none;
+  text-align: center;
+}
+
+.doc-photos img {
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+  border-radius: 12px;
+  background: #eee;
+}
