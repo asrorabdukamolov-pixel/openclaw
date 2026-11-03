@@ -42,7 +42,9 @@ const countersRef = db.collection("meta").doc("counters");
 const deliveryRef = db.collection("meta").doc("delivery");
 
 const PROJECT_ID = process.env.GCLOUD_PROJECT;
-const WEBAPP_URL = `https://${PROJECT_ID}.web.app`;
+// A project can serve the app from an extra Hosting site (a branded web.app name); WEBAPP_URL in
+// functions/.env.<projectId> names it. Without it the project's default site is used.
+const WEBAPP_URL = process.env.WEBAPP_URL || `https://${PROJECT_ID}.web.app`;
 
 // Sections are fixed by the business: furniture only.
 const CATEGORIES = [
