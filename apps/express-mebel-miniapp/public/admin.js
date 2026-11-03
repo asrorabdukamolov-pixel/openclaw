@@ -1,4 +1,4 @@
-// Express Mebel desktop admin panel. Same API as the mini app; the session token from a one-time
+// Express Market desktop admin panel. Same API as the mini app; the session token from a one-time
 // bot link (/panel) stands in for Telegram's initData.
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);

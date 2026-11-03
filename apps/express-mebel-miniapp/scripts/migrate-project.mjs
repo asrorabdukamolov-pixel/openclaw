@@ -1,4 +1,4 @@
-// Copies Express Mebel data from one Firebase project to another: Firestore collections and the
+// Copies Express Market data from one Firebase project to another: Firestore collections and the
 // product / banner photos in Storage, rewriting photo URLs to the new bucket.
 //
 //   node scripts/migrate-project.mjs --from easymoda-95ccf --to expressmebel-tezkor \

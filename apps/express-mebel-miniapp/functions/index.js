@@ -1,4 +1,4 @@
-// Express Mebel — Telegram Mini App backend on Firebase.
+// Express Market — Telegram Mini App backend on Firebase.
 // One HTTPS function serves the mini app API (/api/**, via Hosting rewrite) and the bot webhook.
 //
 // Config (asked by `firebase deploy` on first run, stored in functions/.env.<project>):
@@ -408,7 +408,7 @@ function reverseGeocode(lat, lon) {
   const run = geocodeGate.then(async () => {
     const url = new URL("https://nominatim.openstreetmap.org/reverse");
     url.search = new URLSearchParams({ format: "jsonv2", lat, lon, zoom: "18", addressdetails: "1", "accept-language": "uz" });
-    const res = await fetch(url, { headers: { "user-agent": "ExpressMebelMiniApp/1.0" }, signal: AbortSignal.timeout(8000) });
+    const res = await fetch(url, { headers: { "user-agent": "ExpressMarketMiniApp/1.0" }, signal: AbortSignal.timeout(8000) });
     if (!res.ok) throw new Error(`geocode ${res.status}`);
     const { address = {}, display_name: full = "" } = await res.json();
     const parts = [
@@ -509,7 +509,7 @@ async function handleTelegramUpdate(req, res) {
         chat_id: msg.chat.id,
         parse_mode: "HTML",
         text:
-          "Assalomu alaykum! 👋\n\n<b>Express Mebel Tezkor</b> — Express Mebel'ning onlayn do'koni: ombordagi tayyor mebel, uyingizgacha tez yetkazamiz.\n" +
+          "Assalomu alaykum! 👋\n\n<b>Express Market</b> — ombordagi tayyor mebel onlayn do'koni: uyingizgacha tez yetkazamiz.\n" +
           "Katalogni ochish uchun quyidagi tugmani bosing.",
         reply_markup: { inline_keyboard: [[{ text: "🛋 Katalogni ochish", web_app: { url: WEBAPP_URL } }]] },
       });
@@ -578,7 +578,7 @@ async function joinStaff(from, code) {
     text: `✅ ${staffName(from)}${from.username ? ` (@${from.username})` : ""} ${ROLE_LABEL[result.role]} sifatida qo'shildi.`,
   }).catch((err) => logger.warn("invite notice failed", err));
   return {
-    text: `✅ Siz Express Mebel'ga <b>${ROLE_LABEL[result.role]}</b> sifatida qo'shildingiz.\n\nIlovani oching → ☰ → 📦 Ombor.`,
+    text: `✅ Siz Express Market'ga <b>${ROLE_LABEL[result.role]}</b> sifatida qo'shildingiz.\n\nIlovani oching → ☰ → 📦 Ombor.`,
     reply_markup: openApp,
   };
 }
@@ -725,7 +725,7 @@ async function handleOrder(req, res) {
   }
   try {
     const invoiceLink = await tg("createInvoiceLink", {
-      title: "Express Mebel Tezkor buyurtmasi",
+      title: "Express Market buyurtmasi",
       description: order.items.map((i) => `${i.name} × ${i.qty}`).join(", ").slice(0, 255),
       payload: orderRef.id,
       provider_token: providerToken(),
@@ -1212,7 +1212,7 @@ async function notifyStage(id, o) {
     shipped: pickup
       ? `🏬 Buyurtmangiz ${no} sizga topshirildi. Hammasi joyidami?`
       : `🚚 Buyurtmangiz ${no} yo'lga chiqdi! Qabul qilganingizda pastdagi tugmani bosing.`,
-    delivered: `🎉 Rahmat! Buyurtma ${no} yakunlandi. Express Mebel Tezkor'ni tanlaganingiz uchun rahmat.`,
+    delivered: `🎉 Rahmat! Buyurtma ${no} yakunlandi. Express Market'ni tanlaganingiz uchun rahmat.`,
   }[o.stage];
   if (!text) return;
   const buttons =

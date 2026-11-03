@@ -1412,7 +1412,7 @@ function deliverySettingsSheet(body) {
 const STAFF_ROLE_LABEL = { warehouse: "Omborchi" };
 
 function shareInvite(link) {
-  const text = "Express Mebel omborchisi sifatida qo'shilish uchun havolani bosing va botda Start ni bosing:";
+  const text = "Express Market omborchisi sifatida qo'shilish uchun havolani bosing va botda Start ni bosing:";
   const url = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(text)}`;
   if (tg?.openTelegramLink) tg.openTelegramLink(url);
   else window.open(url, "_blank");

@@ -55,7 +55,7 @@ try {
       const label = document.createElement("div");
       label.className = "label";
       label.innerHTML = `
-        <div class="top"><span>EXPRESS MEBEL</span><span>SKU ${p.sku}</span></div>
+        <div class="top"><span>EXPRESS MARKET</span><span>SKU ${p.sku}</span></div>
         <div class="name"><span>${esc(p.name)}</span><span class="small-box">${box}/${boxes}</span></div>
         <div class="box">Quti ${box}/${boxes}</div>
         <svg preserveAspectRatio="none"></svg>

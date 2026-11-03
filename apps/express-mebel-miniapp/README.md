@@ -1,9 +1,9 @@
-# Express Mebel — Telegram Mini App (Firebase)
+# Express Market — Telegram Mini App (Firebase)
 
 Mebel do'koni uchun Telegram mini ilova: katalog, savat, buyurtma, ombor va mahsulotlarni boshqarish.
 Firebase'da ishlaydi: **Hosting** (sahifalar), **Cloud Functions** (API + bot), **Firestore** (mahsulotlar, ombor, buyurtmalar), **Storage** (rasmlar).
 
-Ranglar va shriftlar Express Mebel brendbukidan:
+Ranglar va shriftlar Express Mebel brendbukidan (Express Market logosi shu shriftdan yig'ilgan):
 
 | Token | Rang | Brendbuk |
 | --- | --- | --- |
