@@ -219,6 +219,16 @@ Haydovchi Telegram ilovada **☰ → 🚚 Reyslarim**:
 
 Mahsulot og'irligi (kg) mahsulot formasida yoki Excel'dagi "Og'irligi, kg" ustunida kiritiladi; komplekt og'irligi modullardan hisoblanadi.
 
+## Shikoyatlar
+
+- Mijoz "⚠️ Muammo bor" ni bosadi (yetkazilganda) yoki mini ilovada buyurtmani ochib **⚠️ Muammo bildirish** (yetkazilgandan keyin 30 kun ichida).
+- Bot so'raydi: muammo turi (singan, qism yetishmaydi, boshqa mahsulot, yig'ish, sifat, boshqa) → qisqa tavsif → 1–5 ta rasm
+  (singan, yetishmagan, boshqa mahsulot va sifat uchun rasm majburiy) → **✅ Yuborish**. Buyurtmalar guruhiga "🛠 Yangi shikoyat S-…" boradi.
+- Panel → **🛠 Shikoyatlar**: ro'yxat, javob muddati (24 soat, o'tsa qizil), mas'ul, holat; turlar va ko'p shikoyat olgan mahsulotlar hisoboti.
+- Shikoyatni ochib: **🙋 Ishga olish** → **mijozga xabar** (bot orqali) → **yechim**: qism yuborish, almashtirish, usta,
+  qisman / to'liq pul qaytarish (Buxgalteriyadagi "Pul qaytarish kutilmoqda"ga tushadi), maslahat yoki asossiz.
+- Yechimdan keyin mijoz 1–5 baho beradi; 1–2 baho guruhga ogohlantirish bo'lib boradi.
+
 ## Buyurtmalar arxivi va bekor qilish
 
 - **Mijoz**: ☰ → **🧾 Mening buyurtmalarim** — holati, tarixi, "Qayta buyurtma berish".

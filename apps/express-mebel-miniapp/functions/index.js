@@ -43,6 +43,7 @@ const adminSessionsCol = db.collection("adminSessions");
 const vehiclesCol = db.collection("vehicles");
 const routesCol = db.collection("routes");
 const applicationsCol = db.collection("driverApplications");
+const complaintsCol = db.collection("complaints");
 const countersRef = db.collection("meta").doc("counters");
 const deliveryRef = db.collection("meta").doc("delivery");
 const segmentsRef = db.collection("meta").doc("segments");
@@ -755,6 +756,8 @@ async function handleTelegramUpdate(req, res) {
         text: "💻 Boshqaruv paneli: havolani kompyuter brauzerida oching. U 10 daqiqa va bir marta ishlaydi.",
         reply_markup: { inline_keyboard: [[{ text: "💻 Panelni ochish", url }]] },
       });
+    } else if (msg && msg.chat.type === "private" && !msg.text?.startsWith("/") && (await collectComplaint(msg))) {
+      // A complaint draft took the message (its text or a photo).
     } else if (msg?.text?.startsWith("/start")) {
       await tg("sendMessage", {
         chat_id: msg.chat.id,
@@ -1676,6 +1679,13 @@ async function handleCallback(q) {
   // The buttons go away once the buyer's order is closed, whoever's press closed it.
   let closeButtons = false;
   try {
+    if (action === "cmp") {
+      const [, act, cid, arg] = String(q.data).split(":");
+      const r = await handleComplaintCallback(q, act, cid || "-", arg);
+      answer = r.answer;
+      closeButtons = Boolean(r.close);
+      return;
+    }
     if (action === "slot") {
       const r = await handleSlotCallback(q, id || "-", slotKey);
       answer = r.answer;
@@ -1705,13 +1715,9 @@ async function handleCallback(q) {
       closeButtons = true;
     } else if (action === "prob") {
       await setStage(id, ["shipped"], "problem");
-      answer = "Xabaringiz qabul qilindi";
+      answer = "Muammoni tasvirlab bering";
       closeButtons = true;
-      await tg("sendMessage", {
-        chat_id: ordersChat(),
-        text: `⚠️ Mijoz ${ORDER_LABEL(o)} buyurtma bo'yicha muammo bildirdi.\n${o.name}, ${o.phone}\nMijoz bilan bog'laning.`,
-      });
-      await tg("sendMessage", { chat_id: q.from.id, text: "Xabaringiz qabul qilindi va ko'rib chiqilmoqda. Natijasi shu botga keladi; zarur bo'lsa mutaxassisimiz siz bilan bog'lanadi." });
+      await startComplaint(id, o);
     }
   } finally {
     if (q.message && closeButtons) {
@@ -2202,12 +2208,6 @@ async function notifyDriver(driverId, text, extra = {}) {
   }
 }
 
-async function saveTelegramPhoto(fileId, path) {
-  const file = await dtg("getFile", { file_id: fileId });
-  const res = await fetch(`https://api.telegram.org/file/bot${DRIVER_BOT_TOKEN.value()}/${file.file_path}`);
-  if (!res.ok) throw new Error(`photo download ${res.status}`);
-  return saveBuffer(Buffer.from(await res.arrayBuffer()), `${path}.jpg`, "image/jpeg");
-}
 
 function regSummary(a) {
   return [
@@ -2282,7 +2282,7 @@ async function submitApplication(from) {
   if (!a || a.step !== "confirm" || a.status !== "draft") return "Ariza topilmadi, /start bosing";
   // Photos move to Storage so HR sees them in the panel without the bot token.
   const photos = {};
-  for (const kind of Object.keys(REG_PHOTOS)) photos[kind] = await saveTelegramPhoto(a[`${kind}FileId`], `drivers/${from.id}/${kind}-${randomUUID()}`);
+  for (const kind of Object.keys(REG_PHOTOS)) photos[kind] = await saveBotPhoto(DRIVER_BOT_TOKEN.value(), a[`${kind}FileId`], `drivers/${from.id}/${kind}-${randomUUID()}`);
   await ref.update({ status: "pending", submittedAt: Date.now(), photos });
   for (const admin of idList(ADMIN_IDS.value())) {
     await tg("sendMessage", {
@@ -2543,6 +2543,247 @@ async function handleHr(req, res, path, method) {
   return null;
 }
 
+// ---------- complaints ("shikoyatlar") ----------
+// The buyer reports a problem from the shipped notice or from "Mening buyurtmalarim"; the bot collects
+// the kind, a short text and photos, then the complaint lands in the panel as a task with a deadline.
+// An admin takes it, writes to the buyer through the bot, picks a resolution and the buyer rates it.
+
+const COMPLAINT_SLA_MS = 24 * 60 * 60 * 1000;
+const COMPLAINT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+const COMPLAINT_MAX_PHOTOS = 5;
+const COMPLAINT_TYPES = {
+  broken: "Singan / shikastlangan",
+  missing: "Qism yetishmaydi",
+  wrong: "Boshqa mahsulot keldi",
+  assembly: "Yig'ishda muammo",
+  quality: "Sifat / nuqson",
+  other: "Boshqa",
+};
+// Kinds a photo proves; for assembly questions or "other" a text is enough.
+const PHOTO_REQUIRED = new Set(["broken", "missing", "wrong", "quality"]);
+const RESOLUTIONS = {
+  part: "Yetishmagan / singan qism yuboriladi",
+  replace: "Mahsulot almashtiriladi",
+  master: "Usta yuboriladi",
+  refund_partial: "Pulning bir qismi qaytariladi",
+  refund_full: "Pul to'liq qaytariladi",
+  advice: "Maslahat berildi, muammo hal bo'ldi",
+  reject: "Shikoyat asossiz deb topildi",
+};
+const complaintNo = (c) => `S-${c.number}`;
+
+async function saveBotPhoto(token, fileId, path) {
+  const file = await callTelegram(token, "getFile", { file_id: fileId });
+  const res = await fetch(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
+  if (!res.ok) throw new Error(`photo download ${res.status}`);
+  return saveBuffer(Buffer.from(await res.arrayBuffer()), `${path}.jpg`, "image/jpeg");
+}
+
+const typeKeyboard = (cid) => ({
+  inline_keyboard: Object.entries(COMPLAINT_TYPES).map(([k, label]) => [{ text: label, callback_data: `cmp:t:${cid}:${k}` }]),
+});
+
+// Opens (or reuses) a complaint draft for an order and asks the buyer what happened.
+async function startComplaint(orderId, o) {
+  if (!o.telegramUserId) throw new HttpError(400, "Mijoz Telegram'da emas");
+  const open = await complaintsCol.where("orderId", "==", orderId).get();
+  const active = open.docs.find((d) => !["resolved", "closed"].includes(d.data().status));
+  if (active?.data().status === "open" || active?.data().status === "in_progress") {
+    throw new HttpError(409, `Bu buyurtma bo'yicha shikoyatingiz (${complaintNo(active.data())}) ko'rib chiqilmoqda`);
+  }
+  const ref = active?.ref ?? complaintsCol.doc();
+  if (!active) {
+    await ref.set({
+      orderId,
+      orderNumber: o.number ?? null,
+      buyerId: o.telegramUserId,
+      name: o.name,
+      phone: o.phone,
+      status: "collecting",
+      step: "type",
+      photos: [],
+      photoIds: [],
+      history: [],
+      createdAt: Date.now(),
+    });
+  }
+  await tg("sendMessage", { chat_id: o.telegramUserId, text: `⚠️ Buyurtma ${ORDER_LABEL(o)}: nima muammo bo'ldi?`, reply_markup: typeKeyboard(ref.id) });
+}
+
+// Buyer messages while a draft is open: the description text, then photos.
+async function collectComplaint(msg) {
+  const snap = await complaintsCol.where("buyerId", "==", msg.from.id).where("status", "==", "collecting").get();
+  const doc = snap.docs.sort((a, b) => b.data().createdAt - a.data().createdAt)[0];
+  if (!doc) return false;
+  const c = doc.data();
+  const chat = msg.chat.id;
+  if (c.step === "type") {
+    await tg("sendMessage", { chat_id: chat, text: "Avval muammo turini tanlang:", reply_markup: typeKeyboard(doc.id) });
+    return true;
+  }
+  if (c.step === "text") {
+    const text = String(msg.text || msg.caption || "").trim();
+    if (text.length < 3) {
+      await tg("sendMessage", { chat_id: chat, text: "Muammoni bir-ikki gap bilan yozing:" });
+      return true;
+    }
+    await doc.ref.update({ text: text.slice(0, 1000), step: "photos" });
+    await tg("sendMessage", {
+      chat_id: chat,
+      text: `📷 Endi rasm yuboring (1–${COMPLAINT_MAX_PHOTOS} ta): muammo aniq ko'rinsin. Tugatgach «✅ Yuborish» ni bosing.`,
+      reply_markup: { inline_keyboard: [[{ text: "✅ Yuborish", callback_data: `cmp:s:${doc.id}` }]] },
+    });
+    return true;
+  }
+  const photo = msg.photo?.at(-1)?.file_id ?? (msg.document?.mime_type?.startsWith("image/") ? msg.document.file_id : null);
+  if (!photo) {
+    await tg("sendMessage", { chat_id: chat, text: "Rasm yuboring yoki «✅ Yuborish» ni bosing.", reply_markup: { inline_keyboard: [[{ text: "✅ Yuborish", callback_data: `cmp:s:${doc.id}` }]] } });
+    return true;
+  }
+  if (c.photoIds.length >= COMPLAINT_MAX_PHOTOS) {
+    await tg("sendMessage", { chat_id: chat, text: `Ko'pi bilan ${COMPLAINT_MAX_PHOTOS} ta rasm. «✅ Yuborish» ni bosing.`, reply_markup: { inline_keyboard: [[{ text: "✅ Yuborish", callback_data: `cmp:s:${doc.id}` }]] } });
+    return true;
+  }
+  await doc.ref.update({ photoIds: [...c.photoIds, photo] });
+  await tg("sendMessage", {
+    chat_id: chat,
+    text: `✔️ ${c.photoIds.length + 1}-rasm qabul qilindi. Yana yuboring yoki «✅ Yuborish» ni bosing.`,
+    reply_markup: { inline_keyboard: [[{ text: "✅ Yuborish", callback_data: `cmp:s:${doc.id}` }]] },
+  });
+  return true;
+}
+
+async function submitComplaint(ref, c, chat) {
+  if (PHOTO_REQUIRED.has(c.type) && !c.photoIds.length) return "Kamida bitta rasm yuboring";
+  const photos = [];
+  for (const [i, id] of c.photoIds.entries()) photos.push(await saveBotPhoto(BOT_TOKEN.value(), id, `complaints/${ref.id}/${i}-${randomUUID()}`));
+  const number = await db.runTransaction(async (t) => {
+    const n = ((await t.get(countersRef)).data()?.complaint ?? 0) + 1;
+    t.set(countersRef, { complaint: n }, { merge: true });
+    t.update(ref, { status: "open", number: n, photos, submittedAt: Date.now(), dueAt: Date.now() + COMPLAINT_SLA_MS });
+    return n;
+  });
+  const order = (await ordersCol.doc(c.orderId).get()).data();
+  const lines = order ? order.items.map((i) => `${i.name} × ${i.qty}`).join(", ") : "";
+  await tg("sendMessage", {
+    chat_id: ordersChat(),
+    text: `🛠 Yangi shikoyat S-${number}: ${ORDER_LABEL(order ?? {})} ${c.name}, ${c.phone}\n${COMPLAINT_TYPES[c.type]}: ${c.text}\n${lines}\n${photos.length} ta rasm. Panel → Shikoyatlar (javob muddati 24 soat).`,
+  }).catch((err) => logger.warn("complaint notice failed", err));
+  await tg("sendMessage", { chat_id: chat, text: `✅ Shikoyatingiz qabul qilindi (S-${number}). 24 soat ichida javob beramiz, natijasi shu botga keladi.` });
+  return "Yuborildi";
+}
+
+async function handleComplaintCallback(q, act, cid, arg) {
+  const ref = complaintsCol.doc(cid);
+  const c = (await ref.get()).data();
+  if (!c || c.buyerId !== q.from.id) return { answer: "Shikoyat topilmadi", close: true };
+  const chat = q.message?.chat.id ?? q.from.id;
+  if (act === "t" && c.status === "collecting" && COMPLAINT_TYPES[arg]) {
+    await ref.update({ type: arg, step: "text" });
+    await tg("sendMessage", { chat_id: chat, text: `${COMPLAINT_TYPES[arg]}. Muammoni qisqacha yozing:` });
+    return { answer: "", close: true };
+  }
+  if (act === "s" && c.status === "collecting") {
+    if (c.step !== "photos") return { answer: "Avval muammoni yozing" };
+    const answer = await submitComplaint(ref, c, chat);
+    return { answer, close: answer === "Yuborildi" };
+  }
+  if (act === "r" && c.status === "resolved" && !c.rating) {
+    const rating = Math.min(5, Math.max(1, Number(arg) || 0));
+    await ref.update({ rating, ratedAt: Date.now(), status: "closed" });
+    await tg("sendMessage", { chat_id: chat, text: rating >= 4 ? "Rahmat! Bahoingiz biz uchun muhim. 🙏" : "Rahmat. Kamchiliklarni tuzatamiz, bahoingiz rahbariyatga yetkazildi." });
+    if (rating <= 2) {
+      await tg("sendMessage", { chat_id: ordersChat(), text: `⭐ ${rating}/5: ${complaintNo(c)} (${c.name}) yechimidan norozi. Panel → Shikoyatlar.` }).catch(() => {});
+    }
+    return { answer: "Rahmat!", close: true };
+  }
+  return { answer: "Bu tugma endi faol emas", close: true };
+}
+
+function complaintView(id, c) {
+  return {
+    id,
+    number: c.number ?? null,
+    orderId: c.orderId,
+    orderNumber: c.orderNumber,
+    name: c.name,
+    phone: c.phone,
+    type: c.type ?? null,
+    text: c.text ?? "",
+    photos: c.photos ?? [],
+    status: c.status,
+    submittedAt: c.submittedAt ?? c.createdAt,
+    dueAt: c.dueAt ?? null,
+    assignee: c.assignee ?? null,
+    resolution: c.resolution ?? null,
+    rating: c.rating ?? null,
+    history: c.history ?? [],
+  };
+}
+
+async function handleComplaints(req, res, path, method) {
+  const start = path.match(/^\/api\/orders\/([\w-]{1,64})\/complaint$/);
+  if (start && method === "POST") {
+    const { user } = await authenticate(req);
+    const o = (await ordersCol.doc(start[1]).get()).data();
+    if (!user || !o || o.telegramUserId !== user.id) throw new HttpError(404, "Buyurtma topilmadi");
+    const closedAt = o.deliveredAt ?? o.stageAt ?? o.createdAt;
+    const allowed = o.stage === "shipped" || o.stage === "problem" || (o.stage === "delivered" && Date.now() - closedAt < COMPLAINT_WINDOW_MS);
+    if (!allowed) throw new HttpError(409, "Bu buyurtma bo'yicha shikoyat qilib bo'lmaydi");
+    await startComplaint(start[1], o);
+    return res.json({ ok: true });
+  }
+  if (path === "/api/complaints" && method === "GET") {
+    await requireRole(req, "admin");
+    const snap = await complaintsCol.where("status", "in", ["open", "in_progress", "resolved", "closed"]).get();
+    return res.json(snap.docs.map((d) => complaintView(d.id, d.data())).sort((a, b) => b.submittedAt - a.submittedAt));
+  }
+  const m = path.match(/^\/api\/complaints\/([\w-]{1,64})\/(take|message|resolve)$/);
+  if (!m || method !== "POST") return null;
+  const { user } = await requireRole(req, "admin");
+  const [, id, action] = m;
+  const ref = complaintsCol.doc(id);
+  const c = (await ref.get()).data();
+  if (!c || c.status === "collecting") throw new HttpError(404, "Shikoyat topilmadi");
+  const by = staffName(user);
+  const log = (text) => [...(c.history ?? []), { at: Date.now(), by, text }];
+  if (action === "take") {
+    if (c.status !== "open") throw new HttpError(409, "Shikoyat allaqachon ishda");
+    await ref.update({ status: "in_progress", assignee: by, takenAt: Date.now(), history: log("Ishga olindi") });
+    await tg("sendMessage", { chat_id: c.buyerId, text: `🛠 Shikoyatingiz ${complaintNo(c)} ishga olindi. Mas'ul: ${by}.` }).catch(() => {});
+  }
+  if (action === "message") {
+    const text = String(req.body?.text || "").trim().slice(0, 1000);
+    if (!text) throw new HttpError(400, "Xabar matnini yozing");
+    await tg("sendMessage", { chat_id: c.buyerId, text: `💬 Shikoyat ${complaintNo(c)} bo'yicha:\n${text}` });
+    await ref.update({ history: log(`Mijozga: ${text}`) });
+  }
+  if (action === "resolve") {
+    if (!["open", "in_progress"].includes(c.status)) throw new HttpError(409, "Shikoyat yopilgan");
+    const kind = RESOLUTIONS[req.body?.kind] ? req.body.kind : null;
+    if (!kind) throw new HttpError(400, "Yechimni tanlang");
+    const note = String(req.body?.note || "").trim().slice(0, 500);
+    const order = (await ordersCol.doc(c.orderId).get()).data();
+    const refundCap = order?.paidAmount ?? order?.total ?? 0;
+    const amount = kind === "refund_full" ? refundCap : kind === "refund_partial" ? Math.round(Number(req.body?.amount)) : 0;
+    if (kind === "refund_partial" && !(amount > 0 && amount < refundCap)) throw new HttpError(400, `Qaytariladigan summani kiriting (0 dan ${formatSum(refundCap)} gacha)`);
+    const resolution = { kind, note, amount, at: Date.now(), by };
+    await ref.update({ status: "resolved", resolution, history: log(`Yechim: ${RESOLUTIONS[kind]}${amount ? ` · ${formatSum(amount)}` : ""}${note ? ` · ${note}` : ""}`) });
+    // Refunds join the accounting queue the cancellations already use; the problem stage closes.
+    const update = {
+      ...(amount ? { refund: { status: "pending", amount, reason: `Shikoyat ${complaintNo(c)}` } } : {}),
+      ...(order?.stage === "problem" ? { stage: "delivered", stageAt: Date.now(), deliveredAt: Date.now() } : {}),
+    };
+    if (Object.keys(update).length) await ordersCol.doc(c.orderId).update(update);
+    await tg("sendMessage", {
+      chat_id: c.buyerId,
+      text: `✅ Shikoyat ${complaintNo(c)} bo'yicha qaror: ${RESOLUTIONS[kind]}${amount ? ` (${formatSum(amount)})` : ""}.${note ? `\n${note}` : ""}\n\nXizmatimizni baholang:`,
+      reply_markup: { inline_keyboard: [[1, 2, 3, 4, 5].map((n) => ({ text: `${n} ⭐`, callback_data: `cmp:r:${id}:${n}` }))] },
+    }).catch((err) => logger.warn("resolution notice failed", err));
+  }
+  return res.json(complaintView(id, (await ref.get()).data()));
+}
+
 async function handleLogistics(req, res, path, method) {
   if (path === "/api/vehicles" && method === "GET") {
     await requireRole(req, "admin");
@@ -2699,6 +2940,10 @@ async function route(req, res) {
 
   if (path === "/api/telegram" && method === "POST") return handleTelegramUpdate(req, res);
   if (path === "/api/driverbot" && method === "POST") return handleDriverBot(req, res);
+  if (path.startsWith("/api/complaints") || /^\/api\/orders\/[\w-]+\/complaint$/.test(path)) {
+    const handled = await handleComplaints(req, res, path, method);
+    if (handled !== null) return handled;
+  }
   if (path.startsWith("/api/driver-applications") || /^\/api\/staff\/\d+\/trust$/.test(path)) {
     const handled = await handleHr(req, res, path, method);
     if (handled !== null) return handled;

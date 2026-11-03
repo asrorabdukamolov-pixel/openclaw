@@ -188,7 +188,7 @@ const views = {};
 views.dashboard = async (page, tools) => {
   tools.innerHTML = periodSeg();
   bindPeriod(render);
-  const orders = await ordersFor(state.period);
+  const [orders, complaints] = await Promise.all([ordersFor(state.period), api("/api/complaints")]);
   const sales = orders.filter(isSale);
   const revenue = sales.reduce((n, o) => n + o.total, 0);
   const cancelled = orders.filter((o) => o.status === "cancelled" && o.stage !== null);
@@ -217,6 +217,7 @@ views.dashboard = async (page, tools) => {
         <li><span>💳 Pul qaytarish kutilmoqda</span><a href="#accounting">${refunds.length}</a></li>
         <li><span>⏳ Tayyor, vaqt tanlanmagan</span><a href="#orders">${noSlot.length}</a></li>
         <li><span>🚚 Topshirilmadi, qaror kerak</span><a href="#logistics">${held.length}</a></li>
+        <li><span>🛠 Faol shikoyatlar</span><a href="#complaints">${complaints.filter((c) => ["open", "in_progress"].includes(c.status)).length}</a></li>
         <li><span>📦 Kam qolgan mahsulotlar (≤ 3)</span><a href="#stock">${low.length}</a></li>
       </ul></div>
       <div class="card"><h3>Eng ko'p sotilgan · ${state.period} kun</h3>${hbars(top.map((t) => ({ label: `${t.name} × ${t.qty}`, value: t.revenue, text: `${sum(t.revenue)}` })))}</div>
@@ -1145,6 +1146,114 @@ function vehicleForm(v) {
   });
 }
 
+// ---------- complaints: tasks with a 24-hour deadline ----------
+const COMPLAINT_TYPES = { broken: "Singan / shikastlangan", missing: "Qism yetishmaydi", wrong: "Boshqa mahsulot keldi", assembly: "Yig'ishda muammo", quality: "Sifat / nuqson", other: "Boshqa" };
+const RESOLUTIONS = {
+  part: "Qism yuboriladi",
+  replace: "Almashtiriladi",
+  master: "Usta yuboriladi",
+  refund_partial: "Qisman pul qaytarish",
+  refund_full: "To'liq pul qaytarish",
+  advice: "Maslahat, hal bo'ldi",
+  reject: "Asossiz",
+};
+const COMPLAINT_STATE = { open: ["Yangi", "warn"], in_progress: ["Ishda", "teal"], resolved: ["Hal qilindi", "ok"], closed: ["Yopildi", "ok"] };
+const overdue = (c) => ["open", "in_progress"].includes(c.status) && c.dueAt < Date.now();
+const complaintPill = (c) => (overdue(c) ? pill(["Muddati o'tdi", "bad"]) : pill(COMPLAINT_STATE[c.status]));
+let complaintFilter = "active";
+
+views.complaints = async (page, tools) => {
+  const list = await api("/api/complaints");
+  const active = list.filter((c) => ["open", "in_progress"].includes(c.status));
+  const rated = list.filter((c) => c.rating);
+  const solved = list.filter((c) => c.resolution);
+  const hours = solved.length ? solved.reduce((n, c) => n + (c.resolution.at - c.submittedAt), 0) / solved.length / 3600e3 : 0;
+  const byType = Object.entries(COMPLAINT_TYPES).map(([k, label]) => ({ label, value: list.filter((c) => c.type === k).length })).filter((x) => x.value);
+  // Which products draw complaints: the order lines behind each complaint.
+  const orders = new Map((await ordersFor(365)).map((o) => [o.id, o]));
+  const byProduct = new Map();
+  for (const c of list) for (const l of orders.get(c.orderId)?.lines ?? []) byProduct.set(l.name, (byProduct.get(l.name) || 0) + 1);
+  const topProducts = [...byProduct].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([label, value]) => ({ label, value, text: `${value} ta` }));
+  tools.innerHTML = `<div class="seg">${[["active", "Faol"], ["resolved", "Hal qilingan"], ["all", "Hammasi"]].map(([k, l]) => `<button type="button" data-cf="${k}" class="${k === complaintFilter ? "on" : ""}">${l}</button>`).join("")}</div>`;
+  tools.onclick = (e) => {
+    const b = e.target.closest("[data-cf]");
+    if (!b) return;
+    complaintFilter = b.dataset.cf;
+    render();
+  };
+  const shown = list.filter((c) => complaintFilter === "all" || (complaintFilter === "active" ? ["open", "in_progress"].includes(c.status) : ["resolved", "closed"].includes(c.status)));
+  page.innerHTML = `
+    <div class="grid cols-4">
+      <div class="card kpi"><small>Faol shikoyatlar</small><b>${active.length}</b><span>${active.filter((c) => c.status === "open").length} tasi hali olinmagan</span></div>
+      <div class="card kpi"><small>Muddati o'tgan</small><b>${list.filter(overdue).length}</b><span>javob muddati 24 soat</span></div>
+      <div class="card kpi"><small>O'rtacha hal qilish</small><b>${solved.length ? `${Math.round(hours)} soat` : "—"}</b><span>${solved.length} ta yechim</span></div>
+      <div class="card kpi"><small>Mijoz bahosi</small><b>${rated.length ? (rated.reduce((n, c) => n + c.rating, 0) / rated.length).toFixed(1) : "—"} ⭐</b><span>${rated.length} ta baho</span></div>
+    </div>
+    <div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>№</th><th>Buyurtma</th><th>Mijoz</th><th>Turi</th><th>Muammo</th><th>Muddat</th><th>Mas'ul</th><th>Holat</th></tr></thead><tbody>${
+      shown
+        .map((c) => `<tr class="click" data-cmp="${c.id}"><td><b>S-${c.number}</b></td><td>#${c.orderNumber ?? "—"}</td><td>${esc(c.name)}<br><span class="muted">${esc(c.phone)}</span></td><td>${esc(COMPLAINT_TYPES[c.type] ?? "—")}</td><td>${esc(c.text.slice(0, 60))}${c.photos.length ? ` <span class="muted">📷${c.photos.length}</span>` : ""}</td><td>${when(c.dueAt)}</td><td>${esc(c.assignee ?? "—")}</td><td>${complaintPill(c)}${c.rating ? ` ${c.rating}⭐` : ""}</td></tr>`)
+        .join("") || '<tr><td colspan="8" class="empty">Shikoyat yo\'q</td></tr>'
+    }</tbody></table></div>
+    <div class="grid cols-2" style="margin-top:16px">
+      <div class="card"><h3>Turlar bo'yicha</h3>${byType.length ? hbars(byType.map((x) => ({ ...x, text: `${x.value} ta` }))) : '<p class="muted">Ma\'lumot yo\'q</p>'}</div>
+      <div class="card"><h3>Ko'p shikoyat olgan mahsulotlar</h3>${topProducts.length ? hbars(topProducts) : '<p class="muted">Ma\'lumot yo\'q</p>'}<p class="muted" style="margin-top:8px">Fabrika bilan gaplashish uchun dalil: qaysi mahsulotda qaysi muammo takrorlanadi.</p></div>
+    </div>`;
+  page.onclick = (e) => {
+    const row = e.target.closest("[data-cmp]");
+    if (row) complaintDrawer(list.find((c) => c.id === row.dataset.cmp));
+  };
+};
+
+function complaintDrawer(c) {
+  openDrawer(`Shikoyat S-${c.number}`, (body) => {
+    const open = ["open", "in_progress"].includes(c.status);
+    body.innerHTML = `
+      <p>${complaintPill(c)} <b>${esc(COMPLAINT_TYPES[c.type] ?? "")}</b></p>
+      <p style="white-space:pre-wrap">${esc(c.text)}</p>
+      ${c.photos.length ? `<div class="doc-photos">${c.photos.map((u, i) => `<a href="${esc(u)}" target="_blank" rel="noopener"><img src="${esc(u)}" alt="Rasm ${i + 1}"/></a>`).join("")}</div>` : ""}
+      <dl class="specs" style="margin-top:14px">
+        <dt>Mijoz</dt><dd>${esc(c.name)}, ${esc(c.phone)}</dd>
+        <dt>Buyurtma</dt><dd><a href="#" data-open-order="${c.orderId}">#${c.orderNumber ?? "—"}</a></dd>
+        <dt>Yuborilgan</dt><dd>${when(c.submittedAt)} · javob muddati ${when(c.dueAt)}</dd>
+        <dt>Mas'ul</dt><dd>${esc(c.assignee ?? "—")}</dd>
+        ${c.resolution ? `<dt>Yechim</dt><dd>${esc(RESOLUTIONS[c.resolution.kind])}${c.resolution.amount ? ` · ${sum(c.resolution.amount)} so'm` : ""}${c.resolution.note ? ` · ${esc(c.resolution.note)}` : ""}</dd>` : ""}
+        ${c.rating ? `<dt>Baho</dt><dd>${"⭐".repeat(c.rating)}</dd>` : ""}
+      </dl>
+      ${c.history.length ? `<h3 style="margin:16px 0 8px">Tarix</h3><ul class="timeline">${c.history.map((h) => `<li><small>${when(h.at)} · ${esc(h.by)}</small><span>${esc(h.text)}</span></li>`).join("")}</ul>` : ""}
+      ${
+        open
+          ? `${c.status === "open" ? '<button class="btn" type="button" data-cact="take" style="margin-top:12px">🙋 Ishga olish</button>' : ""}
+             <div class="stack" style="margin-top:12px"><input class="input" id="cMsg" placeholder="Mijozga xabar (bot orqali boradi)" style="flex:1"/><button class="btn btn--ghost" type="button" data-cact="message">Yuborish</button></div>
+             <h3 style="margin:16px 0 8px">Yechim</h3>
+             <div class="row2"><label class="field">Yechim<select id="cKind">${Object.entries(RESOLUTIONS).map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}</select></label>
+             <label class="field">Qaytariladigan summa (qisman)<input class="input" id="cAmount" type="number" min="0" placeholder="faqat qisman qaytarishda"/></label></div>
+             <label class="field">Izoh mijozga<input class="input" id="cNote" placeholder="Masalan: yangi eshik 2 kunda yetkaziladi"/></label>
+             <button class="btn" type="button" data-cact="resolve" style="margin-top:8px">✅ Yechimni saqlash va mijozga yuborish</button>
+             <p class="muted">Pul qaytarishda summa Buxgalteriyadagi "Pul qaytarish kutilmoqda" ro'yxatiga tushadi. Mijozdan baho so'raladi.</p>`
+          : ""
+      }`;
+    body.onclick = async (e) => {
+      const ord = e.target.closest("[data-open-order]");
+      if (ord) {
+        e.preventDefault();
+        return openOrder(ord.dataset.openOrder);
+      }
+      const act = e.target.closest("[data-cact]")?.dataset.cact;
+      if (!act) return;
+      const payload = { take: {}, message: { text: $("#cMsg", body)?.value }, resolve: { kind: $("#cKind", body)?.value, amount: $("#cAmount", body)?.value, note: $("#cNote", body)?.value } }[act];
+      try {
+        const next = await api(`/api/complaints/${c.id}/${act}`, { method: "POST", body: payload });
+        toast(act === "message" ? "Mijozga yuborildi" : "Saqlandi");
+        dropOrders();
+        complaintDrawer(next);
+        if (act !== "message") render();
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+  });
+}
+
 const BANNER_STYLE = { photo: "Rasm", dark: "Qora", teal: "Moviy" };
 
 views.marketing = async (page, tools) => {
@@ -1456,6 +1565,7 @@ const TITLES = {
   orders: "Savdo va buyurtmalar",
   crm: "CRM: mijozlar",
   logistics: "Logistika",
+  complaints: "Shikoyatlar",
   products: "Mahsulotlar (SKU)",
   stock: "Ombor",
   finance: "Moliya",

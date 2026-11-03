@@ -1244,6 +1244,8 @@ function orderSheet(id, admin) {
       const canAsk = !admin && (o.stage === "picking" || o.stage === "ready") && !o.cancelRequest;
       const canAdmin = admin && ["new", "picking", "ready"].includes(o.stage);
       const reorder = !admin && (o.stage === "delivered" || o.stage === "cancelled");
+      // A problem can be reported while on the way and up to 30 days after delivery.
+      const canComplain = !admin && (o.stage === "shipped" || o.stage === "problem" || (o.stage === "delivered" && Date.now() - (o.deliveredAt ?? 0) < 30 * 864e5));
       body.innerHTML = `<h3>${orderNo(o)} · ${orderState(o)}</h3>
         <ul class="kit-parts">${lines}</ul>
         <dl class="specs">
@@ -1276,6 +1278,7 @@ function orderSheet(id, admin) {
         canSelf ? '<button class="btn btn--danger" data-act="pick">❌ Buyurtmani bekor qilish</button>' : "",
         canAsk ? '<button class="btn btn--ghost" data-act="pick">Bekor qilishni so\'rash</button>' : "",
         !admin && o.cancelRequest ? '<p class="hint">Bekor qilish so\'rovingiz ko\'rib chiqilmoqda, natija botga keladi.</p>' : "",
+        canComplain ? '<button class="btn btn--ghost" data-act="complain">⚠️ Muammo bildirish</button>' : "",
         reorder ? '<button class="btn" data-act="reorder">🔁 Qayta buyurtma berish</button>' : "",
         admin && o.cancelRequest ? '<button class="btn btn--danger" data-act="approve">✅ Bekor qilishni tasdiqlash</button><button class="btn btn--ghost" data-act="reject">↩️ So\'rovni rad etish</button>' : "",
         canAdmin && !o.cancelRequest ? '<button class="btn btn--ghost" data-act="pick">❌ Bekor qilish</button>' : "",
@@ -1300,6 +1303,16 @@ function orderSheet(id, admin) {
         if (!again.length) return toast("Bu mahsulotlar hozir sotuvda yo'q");
         for (const l of again) setQty(l.id, Math.min(l.qty, byId(l.id).stock));
         return openSheet(cartSheet);
+      }
+      if (act === "complain") {
+        try {
+          await api(`/api/orders/${id}/complaint`, { method: "POST" });
+          toast("Botga o'ting: muammoni u yerda tasvirlab berasiz");
+          tg?.close?.();
+        } catch (err) {
+          toast(err.message);
+        }
+        return;
       }
       const call = {
         reason: () => api(`/api/orders/${id}/buyer-cancel`, { method: "POST", body: { reason } }),
