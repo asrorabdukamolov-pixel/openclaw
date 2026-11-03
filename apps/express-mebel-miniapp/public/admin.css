@@ -725,3 +725,26 @@ dl.specs dd {
   border-radius: 12px;
   background: #eee;
 }
+
+/* HR: initials when a person has no photo, PDF tiles among document photos. */
+.avatar-initials {
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: #e5f4f5;
+  color: #007581;
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.pdf-tile {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 3 / 4;
+  border-radius: 12px;
+  background: #f4e4e1;
+  color: #c0392b;
+  font-weight: 700;
+}

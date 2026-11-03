@@ -1398,13 +1398,24 @@ views.logistics = async (page, tools) => {
       ${plan.routes.map(routeCard).join("")}
     </div>
     ${held.length ? `<div class="card" style="margin-top:16px"><h3>⚠️ Topshirilmadi, qaror kerak (${held.length})</h3><ul class="list">${held.map((o) => `<li data-order="${o.id}" style="cursor:pointer"><span><b>${no(o)}</b> ${esc(o.name)} · ${esc(o.phone)}<br><span class="muted">${o.failedAttempts.length} marta topshirilmadi · oxirgisi: ${esc(FAIL_TEXT[o.failedAttempts.at(-1)?.reason] ?? "")}</span></span>${pill(orderState(o))}</li>`).join("")}</ul></div>` : ""}
-    <div class="grid cols-2" style="margin-top:16px">
-      <div class="card"><h3>🚐 Mashinalar</h3><ul class="list">${
-        plan.vehicles.map((v) => `<li data-vehicle="${v.id}" style="cursor:pointer"><span><b>${esc(v.name)}</b> ${esc(v.plate)}<br><span class="muted">${v.capacityKg ? kg(v.capacityKg) : "sig'imi kiritilmagan"}${v.capacityBoxes ? ` · ${v.capacityBoxes} quti` : ""}</span></span>${v.active === false ? pill(["O'chirilgan", ""]) : pill(["Faol", "ok"])}</li>`).join("") || '<li class="muted">Hali mashina yo\'q</li>'
-      }</ul><button class="btn btn--ghost" type="button" id="newVehicle" style="margin-top:10px">＋ Mashina</button></div>
-      <div class="card"><h3>👷 Haydovchilar</h3><ul class="list">${plan.drivers.map((d) => `<li><span><b>${esc(d.name)}</b>${d.username ? ` <span class="muted">@${esc(d.username)}</span>` : ""}<br><span class="muted">${esc(DRIVER_TRUST(d))}</span></span></li>`).join("") || '<li class="muted">Hali haydovchi yo\'q</li>'}</ul>
-        <p class="muted" style="margin-top:10px">Yangi haydovchilar haydovchi botida ro'yxatdan o'tadi, HR Xodimlar bo'limida tasdiqlaydi. Reyslar haydovchi botiga va ilovadagi ☰ → 🚚 Reyslarim'ga keladi.</p></div>
-    </div>`;
+    <div class="card" style="margin-top:16px"><h3>🚚 Haydovchilar va mashinalar</h3>
+      <div class="table-wrap"><table><thead><tr><th></th><th>Haydovchi</th><th>Ish turi</th><th>Mashina</th><th>Sig'imi</th><th></th></tr></thead><tbody>${
+        plan.drivers
+          .map((d) => {
+            const v = plan.vehicles.find((x) => x.id === d.vehicleId);
+            return `<tr><td>${avatar(d)}</td><td><b>${esc(d.name)}</b>${d.username ? `<br><span class="muted">@${esc(d.username)}</span>` : ""}</td><td>${esc(DRIVER_TRUST(d))}</td>
+              <td><select class="input" data-assign-driver="${d.id}" style="min-width:200px"><option value="">— mashinasiz —</option>${plan.vehicles.map((x) => `<option value="${x.id}" ${x.id === d.vehicleId ? "selected" : ""}>${esc([x.name, x.plate].filter(Boolean).join(" · "))}${x.driverId && x.driverId !== d.id ? " (band)" : ""}</option>`).join("")}</select></td>
+              <td>${v ? `${v.capacityKg ? kg(v.capacityKg) : "—"}${v.capacityBoxes ? ` · ${v.capacityBoxes} quti` : ""}` : "—"}</td>
+              <td>${v ? `<button class="btn btn--ghost" type="button" data-vehicle="${v.id}">Mashina</button>` : ""}</td></tr>`;
+          })
+          .join("") || '<tr><td colspan="6" class="empty">Hali haydovchi yo\'q</td></tr>'
+      }</tbody></table></div>
+      ${(() => {
+        const free = plan.vehicles.filter((v) => !plan.drivers.some((d) => d.vehicleId === v.id));
+        return free.length ? `<p class="muted" style="margin:12px 0 6px">Haydovchisiz mashinalar:</p><ul class="list">${free.map((v) => `<li data-vehicle="${v.id}" style="cursor:pointer"><span><b>${esc(v.name)}</b> ${esc(v.plate)}<br><span class="muted">${v.capacityKg ? kg(v.capacityKg) : "sig'imi kiritilmagan"}${v.capacityBoxes ? ` · ${v.capacityBoxes} quti` : ""}</span></span>${v.active === false ? pill(["O'chirilgan", ""]) : pill(["Bo'sh", "warn"])}</li>`).join("")}</ul>` : "";
+      })()}
+      <button class="btn btn--ghost" type="button" id="newVehicle" style="margin-top:10px">＋ Mashina</button>
+      <p class="muted" style="margin-top:10px">Haydovchi botda ro'yxatdan o'tganda mashinasi rasmlari bilan avtomatik biriktiriladi. Mashina almashsa — ro'yxatdan boshqasini tanlang: mashina boshqa haydovchiga o'tadi, rasmlari mashinada qoladi. Hujjat va rasmlar: Xodimlar (HR) → haydovchi kartasi.</p></div>`;
   const picked = () => [...page.querySelectorAll("[data-pick]:checked")].map((x) => byOrder.get(x.dataset.pick));
   const showLoad = () => {
     const el = $("#rLoad");
@@ -1416,7 +1427,33 @@ views.logistics = async (page, tools) => {
     el.innerHTML = `Tanlandi: ${picked().length} ta · ${load.boxes} quti · ${kg(load.weight)}${load.unknown ? ` (${load.unknown} tasida og'irlik kiritilmagan)` : ""}${capacityNote(load, vehicles.find((v) => v.id === $("#rVehicle").value))}${cashNote}`;
   };
   showLoad();
-  page.onchange = showLoad;
+  page.onchange = async (e) => {
+    const sel = e.target.closest("[data-assign-driver]");
+    if (sel) {
+      try {
+        const driverId = sel.dataset.assignDriver;
+        const current = plan.drivers.find((d) => d.id === driverId)?.vehicleId;
+        if (sel.value) await api(`/api/vehicles/${sel.value}/assign`, { method: "POST", body: { driverId } });
+        else if (current) await api(`/api/vehicles/${current}/assign`, { method: "POST", body: { driverId: null } });
+        toast("Mashina biriktirildi");
+        render();
+      } catch (err) {
+        toast(err.message);
+      }
+      return;
+    }
+    // Choosing a driver for a route picks their own car; it can still be changed for this route.
+    if (e.target.id === "rDriver") {
+      const car = plan.drivers.find((d) => d.id === e.target.value)?.vehicleId;
+      if (car && $("#rVehicle").querySelector(`option[value="${car}"]`)) $("#rVehicle").value = car;
+    }
+    showLoad();
+  };
+  if ($("#rDriver")) {
+    const car = plan.drivers.find((d) => d.id === $("#rDriver").value)?.vehicleId;
+    if (car && $("#rVehicle").querySelector(`option[value="${car}"]`)) $("#rVehicle").value = car;
+    showLoad();
+  }
   page.onclick = async (e) => {
     const li = e.target.closest("[data-order]");
     if (li) return openOrder(li.dataset.order);
@@ -1860,6 +1897,78 @@ const PAY_TYPES = { advance: "Avans", salary: "Oylik", bonus: "Bonus" };
 const balanceCell = (n) => (n < 0 ? `<b style="color:#c0392b">${sum(-n)}</b><br><span class="muted">ortiqcha berilgan</span>` : `<b>${sum(n)}</b>`);
 const hhmm = (ts) => (ts ? new Date(ts + 5 * 3600e3).toISOString().slice(11, 16) : "—");
 
+const avatar = (r) =>
+  r.photo ? `<img class="thumb" style="border-radius:50%" src="${esc(r.photo)}" alt=""/>` : `<span class="avatar-initials">${esc((r.name || "?").split(" ").map((w) => w[0]).slice(0, 2).join(""))}</span>`;
+
+// Files go up as data URLs; big photos are shrunk in the browser first (documents stay readable at 1600 px).
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Faylni o'qib bo'lmadi"));
+    reader.onload = () => {
+      if (!file.type.startsWith("image/")) return resolve(reader.result);
+      const img = new Image();
+      img.onload = () => {
+        const k = Math.min(1, 1600 / Math.max(img.width, img.height));
+        const c = Object.assign(document.createElement("canvas"), { width: Math.round(img.width * k), height: Math.round(img.height * k) });
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        resolve(c.toDataURL("image/jpeg", 0.85));
+      };
+      img.onerror = () => resolve(reader.result);
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function pickFile(accept) {
+  return new Promise((resolve) => {
+    const input = Object.assign(document.createElement("input"), { type: "file", accept });
+    input.onchange = () => resolve(input.files[0] ?? null);
+    input.click();
+  });
+}
+
+async function uploadTo(target, role, name) {
+  const file = await pickFile(role === "photo" ? "image/*" : "image/*,application/pdf");
+  if (!file) return false;
+  await api("/api/hr/files", { method: "POST", body: { target, role, name: name || file.name, dataUrl: await fileToDataUrl(file) } });
+  toast("Yuklandi");
+  return true;
+}
+
+// Fixed photos (from the bot registration) plus uploaded documents of one person or car.
+function filesBlock(target, title, fixed = [], docs = []) {
+  return `<h3 style="margin:16px 0 8px">${title}</h3>
+    <div class="doc-photos">${fixed
+      .filter(([, url]) => url)
+      .map(([label, url]) => `<a href="${esc(url)}" target="_blank" rel="noopener"><img src="${esc(url)}" alt="${esc(label)}"/><small>${esc(label)}</small></a>`)
+      .join("")}${docs
+      .map((d) => `<a href="${esc(d.url)}" target="_blank" rel="noopener">${d.type === "application/pdf" ? '<span class="pdf-tile">PDF</span>' : `<img src="${esc(d.url)}" alt=""/>`}<small>${esc(d.name)}</small></a>`)
+      .join("")}</div>
+    ${docs.length ? `<ul class="list" style="margin-top:6px">${docs.map((d) => `<li><span>${esc(d.name)} <span class="muted">${when(d.at)}</span></span><button class="btn btn--ghost" type="button" data-rmfile="${esc(target)}" data-url="${esc(d.url)}">O'chirish</button></li>`).join("")}</ul>` : ""}
+    <div class="stack" style="margin-top:8px"><input class="input" placeholder="Hujjat nomi (masalan: Pasport, Shartnoma)" data-docname="${esc(target)}" style="flex:1"/><button class="btn btn--ghost" type="button" data-upload="${esc(target)}">📎 Hujjat / rasm yuklash</button></div>`;
+}
+
+// Shared click handling for photo, document upload and removal inside a drawer; `reopen` redraws it.
+function bindFiles(body, reopen) {
+  body.onclick = async (e) => {
+    const up = e.target.closest("[data-upload]");
+    const ph = e.target.closest("[data-photo]");
+    const rm = e.target.closest("[data-rmfile]");
+    try {
+      if (up && (await uploadTo(up.dataset.upload, "doc", body.querySelector(`[data-docname="${up.dataset.upload}"]`)?.value))) reopen();
+      if (ph && (await uploadTo(ph.dataset.photo, "photo"))) reopen();
+      if (rm && window.confirm("Hujjat o'chirilsinmi?")) {
+        await api("/api/hr/files/remove", { method: "POST", body: { target: rm.dataset.rmfile, url: rm.dataset.url } });
+        reopen();
+      }
+    } catch (err) {
+      toast(err.message);
+    }
+  };
+}
+
 function employeeForm(e) {
   openDrawer(e ? e.name : "Yangi xodim (oylikli)", (body) => {
     body.innerHTML = `<form id="empForm" autocomplete="off">
@@ -1867,14 +1976,23 @@ function employeeForm(e) {
       <div class="row2"><label class="field">Lavozim<input class="input" name="empPos" value="${esc(e?.position)}" placeholder="Omborchi, operator, buxgalter" /></label>
       <label class="field">Telefon<input class="input" name="empPhone" value="${esc(e?.phone)}" /></label></div>
       <label class="field">Oylik (qat'iy, so'm)<input class="input" name="empSalary" type="number" min="0" step="10000" required value="${e?.salary ?? ""}" /></label>
+      <label class="check" style="margin-top:6px"><input type="checkbox" name="ownSchedule" ${e?.schedule ? "checked" : ""}/> Shaxsiy ish jadvali (umumiy jadvaldan farqli)</label>
+      <div id="ownSchedule" ${e?.schedule ? "" : "hidden"}>
+        <div class="stack" style="margin-top:6px">${[[1, "Du"], [2, "Se"], [3, "Ch"], [4, "Pa"], [5, "Ju"], [6, "Sh"], [0, "Ya"]].map(([d, l]) => `<label class="check"><input type="checkbox" name="ewd" value="${d}" ${(e?.schedule?.workDays ?? [1, 2, 3, 4, 5, 6]).includes(d) ? "checked" : ""}/> ${l}</label>`).join("")}</div>
+        <div class="row2"><label class="field">Ish boshlanishi<input class="input" type="time" name="eStart" value="${e?.schedule?.start ?? "09:00"}"/></label><label class="field">Ish tugashi<input class="input" type="time" name="eEnd" value="${e?.schedule?.end ?? "18:00"}"/></label></div>
+      </div>
       ${e ? `<label class="check"><input type="checkbox" name="empActive" ${e.active === false ? "" : "checked"}/> Ishlayapti</label>` : ""}
       <button class="btn" type="submit" style="margin-top:10px">Saqlash</button></form>
       <p class="muted" style="margin-top:10px">Saqlagach, xodim kartasidan «Telegram'ni ulash» havolasini oling: xodim uni bosib, botda «📍 Keldim / Ketdim» bilan keldi-ketdini belgilaydi.</p>`;
+    $("#empForm", body).onchange = (ev) => {
+      if (ev.target.name === "ownSchedule") $("#ownSchedule", body).hidden = !ev.target.checked;
+    };
     $("#empForm", body).onsubmit = async (ev) => {
       ev.preventDefault();
       const f = new FormData(ev.target);
+      const schedule = f.has("ownSchedule") ? { workDays: f.getAll("ewd").map(Number), start: f.get("eStart"), end: f.get("eEnd") } : null;
       try {
-        await api(e ? `/api/hr/employees/${e.id}` : "/api/hr/employees", { method: e ? "PUT" : "POST", body: { name: f.get("empName"), position: f.get("empPos"), phone: f.get("empPhone"), salary: f.get("empSalary"), active: e ? f.has("empActive") : true } });
+        await api(e ? `/api/hr/employees/${e.id}` : "/api/hr/employees", { method: e ? "PUT" : "POST", body: { name: f.get("empName"), position: f.get("empPos"), phone: f.get("empPhone"), salary: f.get("empSalary"), schedule, active: e ? f.has("empActive") : true } });
         toast("Saqlandi");
         closeDrawer();
         render();
@@ -1904,10 +2022,15 @@ async function personDrawer(row) {
     const d = await api(`/api/hr/person?key=${encodeURIComponent(row.key)}&month=${hrMonth}`);
     const head = `<div class="grid cols-2" style="gap:10px"><div class="card kpi"><small>Hisoblangan</small><b>${sum(row.accrued + row.bonus)}</b><span>${esc(row.work)}</span></div><div class="card kpi"><small>Berilishi kerak</small><b>${balanceCell(row.balance)}</b><span>berilgan ${sum(row.paid)}</span></div></div>`;
     const payments = `<h3 style="margin:16px 0 8px">To'lovlar tarixi</h3><ul class="list">${d.payments.map((p) => `<li><span>${PAY_TYPES[p.type]} · ${p.month}<br><span class="muted">${when(p.at)} · ${p.from === "cash" ? "kassadan" : "kartaga"} · ${esc(p.by)}${p.note ? ` · ${esc(p.note)}` : ""}</span></span><b>${sum(p.amount)}</b></li>`).join("") || '<li class="muted">Hali to\'lov yo\'q</li>'}</ul>`;
+    const reopen = () => {
+      render();
+      personDrawer(row);
+    };
+    const photoHead = (target, photo) => `<div style="display:flex;gap:14px;align-items:center;margin-bottom:12px">${photo ? `<img src="${esc(photo)}" alt="" style="width:72px;height:72px;border-radius:50%;object-fit:cover"/>` : `<span class="avatar-initials" style="width:72px;height:72px;font-size:24px">${esc(row.name.split(" ").map((w) => w[0]).slice(0, 2).join(""))}</span>`}<button class="btn btn--ghost" type="button" data-photo="${esc(target)}">📷 ${photo ? "Rasmni almashtirish" : "Rasm yuklash"}</button></div>`;
     if (d.kind === "emp") {
       const e = d.employee;
-      body.innerHTML = `${head}
-        <dl class="specs" style="margin-top:12px"><dt>Lavozim</dt><dd>${esc(e.position || "—")}</dd><dt>Oylik</dt><dd>${sum(e.salary)} so'm · soatiga ${sum(row.detail.rate)}</dd><dt>Telegram</dt><dd>${e.telegramId ? `ulangan${e.username ? ` · @${esc(e.username)}` : ""}` : '<button class="btn btn--ghost" type="button" id="empLink">🔗 Ulash havolasini olish</button>'}</dd></dl>
+      body.innerHTML = `${photoHead(`emp:${e.id}`, e.photo)}${head}
+        <dl class="specs" style="margin-top:12px"><dt>Lavozim</dt><dd>${esc(e.position || "—")}</dd><dt>Telefon</dt><dd>${esc(e.phone || "—")}</dd><dt>Oylik</dt><dd>${sum(e.salary)} so'm · soatiga ${sum(row.detail.rate)}</dd><dt>Ish jadvali</dt><dd>${e.schedule ? `shaxsiy: ${esc(e.schedule.start)}–${esc(e.schedule.end)}` : `umumiy: ${esc(d.settings.start)}–${esc(d.settings.end)}`} · oy normasi ${row.detail.normHours} soat</dd><dt>Telegram</dt><dd>${e.telegramId ? `ulangan${e.username ? ` · @${esc(e.username)}` : ""}` : '<button class="btn btn--ghost" type="button" id="empLink">🔗 Ulash havolasini olish</button>'}</dd></dl>
         <button class="btn btn--ghost" type="button" id="empEdit" style="margin-top:8px">✏️ Tahrirlash</button>
         <h3 style="margin:16px 0 8px">Keldi-ketdi · ${hrMonth}</h3>
         <div class="table-wrap"><table><thead><tr><th>Sana</th><th>Keldi</th><th>Ketdi</th><th class="num">Soat</th><th>Izoh</th></tr></thead><tbody>${
@@ -1917,7 +2040,9 @@ async function personDrawer(row) {
           <div class="row2"><label class="field">Sana<input class="input" type="date" id="aDate" value="${dayKey(Date.now())}"/></label><label class="field">Izoh (majburiy)<input class="input" id="aNote"/></label></div>
           <div class="row2"><label class="field">Keldi<input class="input" type="time" id="aIn" value="${d.settings.start}"/></label><label class="field">Ketdi<input class="input" type="time" id="aOut" value="${d.settings.end}"/></label></div>
           <button class="btn btn--ghost" type="button" id="aSave">Saqlash</button></details>
+        ${filesBlock(`emp:${e.id}`, "📁 Hujjatlar", [], e.docs ?? [])}
         ${payForm(row)}${payments}`;
+      bindFiles(body, reopen);
       $("#empEdit", body).onclick = () => employeeForm(e);
       if ($("#empLink", body)) {
         $("#empLink", body).onclick = async () => {
@@ -1937,13 +2062,34 @@ async function personDrawer(row) {
         }
       };
     } else {
-      body.innerHTML = `${head}
+      const pr = d.profile;
+      const car = d.vehicle;
+      const cp = car?.photos ?? {};
+      body.innerHTML = `${photoHead(`drv:${pr.id}`, pr.photo ?? pr.photos?.withCar)}${head}
+        <dl class="specs" style="margin-top:12px"><dt>Telefon</dt><dd>${esc(pr.phone || "—")}${pr.username ? ` · @${esc(pr.username)}` : ""}</dd><dt>Ish turi</dt><dd>${esc(DRIVER_TRUST(pr))}</dd>${pr.rating ? `<dt>Baho</dt><dd>⭐ ${pr.rating} (${pr.ratingCount})</dd>` : ""}</dl>
+        ${filesBlock(`drv:${pr.id}`, "📁 Haydovchi hujjatlari", [["Mashina oldida", pr.photos?.withCar], ["Pasport", pr.photos?.passport], ["Prava", pr.photos?.license]], pr.docs ?? [])}
+        <h3 style="margin:16px 0 8px">🚐 Mashina</h3>
+        ${car ? `<p><b>${esc(car.name)}</b> ${esc(car.plate)} · ${car.capacityKg ? kg(car.capacityKg) : "sig'imi kiritilmagan"}${car.capacityBoxes ? ` · ${car.capacityBoxes} quti` : ""}</p>` : '<p class="muted">Mashina biriktirilmagan</p>'}
+        <div class="stack"><select class="input" id="carPick" style="flex:1"><option value="">— mashinasiz —</option>${d.vehicles.map((v) => `<option value="${v.id}" ${v.id === car?.id ? "selected" : ""}>${esc([v.name, v.plate].filter(Boolean).join(" · "))}${v.driverId && v.driverId !== pr.id ? " (boshqa haydovchida)" : ""}</option>`).join("")}</select><button class="btn btn--ghost" type="button" id="carSave">Biriktirish</button></div>
+        ${car ? filesBlock(`veh:${car.id}`, "📷 Mashina rasmlari va hujjatlari", [["Oldi", cp.front], ["Orqasi", cp.back], ["Chap", cp.left], ["O'ng", cp.right], ["Texpasport", cp.techpass]], car.docs ?? []) : ""}
         <h3 style="margin:16px 0 8px">Yetkazishlar · ${hrMonth}</h3>
         <div class="table-wrap"><table><thead><tr><th>Sana</th><th>Buyurtma</th><th class="num">km</th><th class="num">Yetkazish puli</th><th class="num">Haydovchiga</th><th>Baho</th></tr></thead><tbody>${
           d.deliveries.map((o) => `<tr><td>${when(o.at)}</td><td>#${o.number} ${esc(o.name)}</td><td class="num">${o.km ?? "—"}</td><td class="num">${sum(o.fee)}</td><td class="num"><b>${sum(o.pay)}</b></td><td>${o.rating ? "⭐".repeat(o.rating) : "—"}</td></tr>`).join("") || '<tr><td colspan="6" class="empty">Bu oy yetkazish yo\'q</td></tr>'
         }</tbody></table></div>
         <h3 style="margin:16px 0 8px">📸 Reklama hisobotlari</h3><ul class="list">${d.ads.map((r) => `<li><span>${r.month}</span>${pill(r.status === "approved" ? [`+${sum(r.amount)}`, "ok"] : r.status === "pending" ? ["Ko'rib chiqilmoqda", "warn"] : r.status === "rejected" ? ["Rad etilgan", "bad"] : ["Yuborilmagan", ""])}</li>`).join("") || '<li class="muted">Hali yo\'q</li>'}</ul>
         ${payForm(row)}${payments}`;
+      bindFiles(body, reopen);
+      $("#carSave", body).onclick = async () => {
+        const vehicleId = $("#carPick", body).value;
+        try {
+          if (vehicleId) await api(`/api/vehicles/${vehicleId}/assign`, { method: "POST", body: { driverId: pr.id } });
+          else if (car) await api(`/api/vehicles/${car.id}/assign`, { method: "POST", body: { driverId: null } });
+          toast("Saqlandi");
+          reopen();
+        } catch (err) {
+          toast(err.message);
+        }
+      };
     }
     $("#pGo", body).onclick = async () => {
       try {
@@ -1997,11 +2143,11 @@ views.staff = async (page, tools) => {
         ? `<div class="card" style="margin-top:16px"><h3>📸 Reklama hisobotlari (${ads.length})</h3><ul class="list">${ads.map((r) => `<li data-ad="${esc(r.id)}" style="cursor:pointer"><span><b>${esc(r.driverName ?? r.driverId)}</b> · ${r.month}<br><span class="muted">${when(r.submittedAt)} · 4 ta rasm</span></span>${pill(["Ko'rib chiqish", "warn"])}</li>`).join("")}</ul></div>`
         : ""
     }
-    <div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Xodim</th><th>Lavozim</th><th>Ishlagan</th><th class="num">Hisoblangan</th><th class="num">Bonus</th><th class="num">Berilgan</th><th class="num">Berilishi kerak</th></tr></thead><tbody>${
+    <div class="table-wrap" style="margin-top:16px"><table><thead><tr><th></th><th>Xodim</th><th>Lavozim</th><th>Ishlagan</th><th class="num">Hisoblangan</th><th class="num">Bonus</th><th class="num">Berilgan</th><th class="num">Berilishi kerak</th></tr></thead><tbody>${
       pay.rows
         .filter((r) => r.active || r.accrued || r.paid)
-        .map((r) => `<tr class="click" data-person="${esc(r.key)}"><td><b>${esc(r.name)}</b>${r.kind === "employee" && !r.linked ? '<br><span class="muted">⚠️ Telegram ulanmagan</span>' : ""}</td><td>${esc(r.position)}</td><td>${esc(r.work)}</td><td class="num">${sum(r.accrued)}</td><td class="num">${r.bonus ? sum(r.bonus) : "—"}</td><td class="num">${r.paid ? sum(r.paid) : "—"}</td><td class="num">${balanceCell(r.balance)}</td></tr>`)
-        .join("") || '<tr><td colspan="7" class="empty">Hali xodim yo\'q. «＋ Xodim (oylikli)» bilan qo\'shing.</td></tr>'
+        .map((r) => `<tr class="click" data-person="${esc(r.key)}"><td>${avatar(r)}</td><td><b>${esc(r.name)}</b>${r.kind === "employee" && !r.linked ? '<br><span class="muted">⚠️ Telegram ulanmagan</span>' : ""}${r.vehicle ? `<br><span class="muted">🚐 ${esc(r.vehicle)}</span>` : ""}</td><td>${esc(r.position)}${r.detail?.schedule ? `<br><span class="muted">${esc(r.detail.schedule)}</span>` : ""}</td><td>${esc(r.work)}</td><td class="num">${sum(r.accrued)}</td><td class="num">${r.bonus ? sum(r.bonus) : "—"}</td><td class="num">${r.paid ? sum(r.paid) : "—"}</td><td class="num">${balanceCell(r.balance)}</td></tr>`)
+        .join("") || '<tr><td colspan="8" class="empty">Hali xodim yo\'q. «＋ Xodim (oylikli)» bilan qo\'shing.</td></tr>'
     }</tbody></table></div>
     <p class="muted" style="margin-top:8px">Oylik ishlagan soat bo'yicha: oylik ÷ oy normasi (${pay.normHours} soat) × ishlagan soat. Haydovchi: yetkazish pulidan komissiyadan keyingi qismi + tasdiqlangan reklama bonusi. Usta: to'langan ishlardagi ulushi.</p>
     <div style="margin-top:16px"></div>

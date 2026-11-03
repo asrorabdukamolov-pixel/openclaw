@@ -74,6 +74,17 @@ export function createHr(ctx) {
     return { workDays: days, start, end, radius, adBonus, office: input.office ? ctx.parseLocation(input.office) : null, updatedAt: Date.now() };
   }
 
+  // A personal schedule overrides the company one for norm hours and lateness (part-time, shifts).
+  function cleanSchedule(input) {
+    if (!input) return null;
+    const days = [...new Set((Array.isArray(input.workDays) ? input.workDays : []).map(Number))].filter((d) => d >= 0 && d <= 6).sort();
+    const ok = (v) => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(v));
+    if (!days.length || !ok(input.start) || !ok(input.end) || minutes(input.end) <= minutes(input.start)) throw new HttpError(400, "Shaxsiy ish jadvali noto'g'ri: kunlar va vaqtni tekshiring");
+    return { workDays: days, start: input.start, end: input.end };
+  }
+
+  const scheduleOf = (e, s) => ({ ...s, ...(e.schedule ?? {}) });
+
   function cleanEmployee(input) {
     const name = String(input.name || "").trim().slice(0, 80);
     if (!name) throw new HttpError(400, "Ismni kiriting");
@@ -84,6 +95,7 @@ export function createHr(ctx) {
       position: String(input.position || "").trim().slice(0, 60),
       phone: String(input.phone || "").trim().slice(0, 30),
       salary,
+      schedule: cleanSchedule(input.schedule),
       active: input.active !== false,
       updatedAt: Date.now(),
     };
@@ -122,10 +134,11 @@ export function createHr(ctx) {
     const now = Date.now();
     const date = dayKey(now);
     const ref = attendanceCol.doc(`${emp.id}_${date}`);
+    const own = scheduleOf(emp.data(), s);
     const a = (await ref.get()).data();
     const hhmm = new Date(now + TZ).toISOString().slice(11, 16);
     if (!a) {
-      const late = Math.max(0, Math.round((now - at(date, s.start)) / 60000));
+      const late = Math.max(0, Math.round((now - at(date, own.start)) / 60000));
       await ref.set({ employeeId: emp.id, date, inAt: now, inDist: dist, lateMin: late, outAt: null });
       return reply(`🟢 Keldingiz: ${hhmm}.${late > 0 ? ` ⏰ ${late} daqiqa kechikish.` : " Vaqtida 👍"}`), true;
     }
@@ -192,18 +205,22 @@ export function createHr(ctx) {
     ]);
     const paid = new Map();
     for (const p of pays.docs.map((d) => d.data())) paid.set(p.personKey, (paid.get(p.personKey) || 0) + p.amount);
-    const norm = normHours(month, s);
+    const companyNorm = normHours(month, s);
+    const vehicles = new Map((await db.collection("vehicles").get()).docs.map((v) => [v.id, v.data()]));
     const rows = [];
     for (const e of emps.docs) {
       const d = e.data();
+      const own = scheduleOf(d, s);
+      const norm = normHours(month, own);
       const days = att.docs.map((x) => x.data()).filter((a) => a.employeeId === e.id);
-      const hours = days.reduce((n, a) => n + dayHours(a, s, now), 0);
+      const hours = days.reduce((n, a) => n + dayHours(a, own, now), 0);
       const accrued = norm ? Math.round((hours * d.salary) / norm) : 0;
       const key = `emp:${e.id}`;
       rows.push({
         key,
         kind: "employee",
         name: d.name,
+        photo: d.photo ?? null,
         position: d.position || "Xodim",
         active: d.active !== false,
         linked: Boolean(d.telegramId),
@@ -211,7 +228,7 @@ export function createHr(ctx) {
         accrued,
         bonus: 0,
         paid: paid.get(key) || 0,
-        detail: { salary: d.salary, normHours: norm, hours, rate: norm ? Math.round(d.salary / norm) : 0 },
+        detail: { salary: d.salary, normHours: norm, hours, rate: norm ? Math.round(d.salary / norm) : 0, schedule: d.schedule ? `${own.start}–${own.end}` : null },
       });
     }
     const handed = delivered.docs.map((x) => ({ id: x.id, ...x.data() }));
@@ -221,10 +238,13 @@ export function createHr(ctx) {
       const km = mine.reduce((n, o) => n + (o.delivery?.km ?? 0), 0);
       const ad = ads.docs.map((x) => x.data()).find((r) => r.driverId === dr.id && r.status === "approved");
       const key = `drv:${dr.id}`;
+      const car = vehicles.get(dr.data().vehicleId);
       rows.push({
         key,
         kind: "driver",
         name: dr.data().name,
+        photo: dr.data().photo ?? dr.data().photos?.withCar ?? null,
+        vehicle: car ? [car.name, car.plate].filter(Boolean).join(" · ") : null,
         position: dr.data().employment === "staff" ? "Haydovchi (shtatda)" : "Haydovchi (yollanma)",
         active: true,
         work: `${mine.length} ta manzil · ${Math.round(km)} km${dr.data().rating ? ` · ⭐ ${dr.data().rating}` : ""}`,
@@ -242,6 +262,7 @@ export function createHr(ctx) {
         key: `mst:${m.id}`,
         kind: "master",
         name: m.data().name,
+        photo: m.data().photos?.face ?? null,
         position: "Usta (ishbay)",
         active: m.data().status === "active",
         work: `${mine.length} ta ish${m.data().rating ? ` · ⭐ ${m.data().rating}` : ""}`,
@@ -252,7 +273,7 @@ export function createHr(ctx) {
       });
     }
     for (const r of rows) r.balance = r.accrued + r.bonus - r.paid;
-    return { month, settings: s, normHours: norm, rows };
+    return { month, settings: s, normHours: companyNorm, rows };
   }
 
   async function person(key, month) {
@@ -265,7 +286,8 @@ export function createHr(ctx) {
       const e = (await employeesCol.doc(id).get()).data();
       if (!e) throw new HttpError(404, "Xodim topilmadi");
       const att = (await attendanceCol.where("employeeId", "==", id).get()).docs.map((d) => d.data()).filter((a) => a.date.startsWith(month)).sort((a, b) => a.date.localeCompare(b.date));
-      return { kind, employee: { id, ...e, inviteCode: undefined }, attendance: att.map((a) => ({ ...a, hours: Math.round(dayHours(a, s, now) * 100) / 100, open: !a.outAt })), payments: pays, settings: s };
+      const own = scheduleOf(e, s);
+      return { kind, employee: { id, ...e, inviteCode: undefined }, attendance: att.map((a) => ({ ...a, hours: Math.round(dayHours(a, own, now) * 100) / 100, open: !a.outAt })), payments: pays, settings: own, company: s };
     }
     if (kind === "drv") {
       const orders = (await ctx.ordersCol.where("handedById", "==", id).get()).docs
@@ -274,7 +296,10 @@ export function createHr(ctx) {
         .sort((a, b) => b.handedAt - a.handedAt)
         .map((o) => ({ number: o.number, name: o.name, at: o.handedAt, km: o.delivery?.km ?? null, fee: (o.delivery?.total ?? 0) + (o.retryFees ?? 0), pay: o.driverPay ?? 0, cash: o.cashCollected ?? 0, rating: o.driverRating ?? null }));
       const ads = (await adCol.where("driverId", "==", id).get()).docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => b.month.localeCompare(a.month));
-      return { kind, deliveries: orders, ads, payments: pays };
+      const staff = (await ctx.staffCol.doc(id).get()).data() ?? {};
+      const vehicles = (await db.collection("vehicles").get()).docs.map((v) => ({ id: v.id, ...v.data() }));
+      const { awaitingCash, ...profile } = staff;
+      return { kind, profile: { id, ...profile }, vehicle: vehicles.find((v) => v.id === staff.vehicleId) ?? null, vehicles, deliveries: orders, ads, payments: pays };
     }
     throw new HttpError(400, "Ustalar tarixi «Ustalar» bo'limida");
   }
@@ -319,15 +344,16 @@ export function createHr(ctx) {
       // HR correction of a day (forgotten check-out, a day off the system); kept with who and why.
       const id = String(body.employeeId || "");
       const date = String(body.date || "");
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !(await employeesCol.doc(id).get()).exists) throw new HttpError(400, "Xodim va sanani tanlang");
+      const empDoc = (await employeesCol.doc(id).get()).data();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !empDoc) throw new HttpError(400, "Xodim va sanani tanlang");
       const time = (v) => (/^\d{2}:\d{2}$/.test(String(v)) ? at(date, String(v)) : null);
       const inAt = time(body.in);
       const outAt = time(body.out);
       if (!inAt || (outAt && outAt <= inAt)) throw new HttpError(400, "Kelish va ketish vaqtini to'g'ri kiriting");
       const note = String(body.note || "").trim().slice(0, 200);
       if (!note) throw new HttpError(400, "Tuzatish sababini yozing");
-      const s = await settings();
-      await attendanceCol.doc(`${id}_${date}`).set({ employeeId: id, date, inAt, outAt, lateMin: Math.max(0, Math.round((inAt - at(date, s.start)) / 60000)), corrected: { by, at: Date.now(), note } });
+      const own = scheduleOf(empDoc, await settings());
+      await attendanceCol.doc(`${id}_${date}`).set({ employeeId: id, date, inAt, outAt, lateMin: Math.max(0, Math.round((inAt - at(date, own.start)) / 60000)), corrected: { by, at: Date.now(), note } });
       return res.json({ ok: true });
     }
     if (path === "/api/hr/pay" && method === "POST") {
@@ -348,6 +374,30 @@ export function createHr(ctx) {
         t.set(paymentsCol.doc(), { personKey: key, name, month, type, amount, from, note: String(body.note || "").slice(0, 200), at: Date.now(), by });
       });
       return res.json({ ok: true });
+    }
+    // Photos and documents kept on a person or a car: an employee, a driver or a vehicle.
+    if ((path === "/api/hr/files" || path === "/api/hr/files/remove") && method === "POST") {
+      const m = /^(emp|drv|veh):([\w-]{1,64})$/.exec(String(body.target || ""));
+      if (!m) throw new HttpError(400, "Kimga yoki qaysi mashinaga yuklanayotgani noma'lum");
+      const ref = { emp: employeesCol, drv: ctx.staffCol, veh: db.collection("vehicles") }[m[1]].doc(m[2]);
+      const doc = (await ref.get()).data();
+      if (!doc) throw new HttpError(404, "Topilmadi");
+      if (path.endsWith("/remove")) {
+        await ref.update({ docs: (doc.docs ?? []).filter((d) => d.url !== body.url) });
+        return res.json({ ok: true });
+      }
+      const f = /^data:(image\/(?:jpeg|png|webp)|application\/pdf);base64,(.+)$/.exec(String(body.dataUrl || ""));
+      if (!f) throw new HttpError(400, "Faqat rasm (JPG, PNG, WEBP) yoki PDF");
+      const buffer = Buffer.from(f[2], "base64");
+      if (buffer.length > 6 * 1024 * 1024) throw new HttpError(400, "Fayl 6 MB dan katta bo'lmasin");
+      const ext = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "application/pdf": "pdf" }[f[1]];
+      const url = await ctx.saveBuffer(buffer, `hr/${m[1]}-${m[2]}/${ctx.uuid()}.${ext}`, f[1]);
+      if (body.role === "photo") await ref.update({ photo: url });
+      else {
+        const name = String(body.name || "Hujjat").trim().slice(0, 80);
+        await ref.update({ docs: [...(doc.docs ?? []), { name, url, type: f[1], at: Date.now(), by }] });
+      }
+      return res.json({ ok: true, url });
     }
     if (path === "/api/hr/ad-reports" && method === "GET") {
       const snap = await adCol.where("status", "==", "pending").get();

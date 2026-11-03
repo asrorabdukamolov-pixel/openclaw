@@ -237,6 +237,11 @@ Panel → **Xodimlar (HR)** (yuqorida oy tanlanadi; hisob har oyning 1-sanasidan
 - **Usta:** to'langan ishlardagi ulushi (to'lov «Ustalar» bo'limida).
 - **To'lov berish:** avans / oylik / bonus, kartaga yoki kassadan (kassada «Maosh» chiqimi). Tarix xodim kartasida.
 - Sozlamalar → **HR:** ish kunlari, ish vaqti, radius, ofis lokatsiyasi, reklama bonusi.
+- **Xodim kartasi:** rasm (jadvalda ham ko'rinadi), hujjatlar (rasm yoki PDF: pasport, shartnoma…), shaxsiy ish jadvali
+  (kunlar, soatlar — oylik normasi va kechikish shundan) va oylik.
+- **Haydovchi va mashina bog'langan:** botdan ro'yxatdan o'tganda mashina rasmlari va texpasporti mashinaga, pasport, prava va
+  "mashina oldida" rasmi haydovchiga tushadi. Mashinani boshqa haydovchiga o'tkazish yoki haydovchiga boshqa mashina berish —
+  Logistika → "Haydovchilar va mashinalar" yoki haydovchi kartasida; rasmlar va hujjatlar mashinada qoladi.
 
 ## Ustalar (mebel yig'ish)
 

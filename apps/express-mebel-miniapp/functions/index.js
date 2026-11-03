@@ -2658,13 +2658,17 @@ async function handleHr(req, res, path, method) {
     const trust = cleanTrust(req.body || {});
     const vehicleRef = vehiclesCol.doc();
     await db.runTransaction(async (t) => {
-      t.set(vehicleRef, { name: a.car, plate: a.plate, capacityKg: a.capacityKg, capacityBoxes: null, active: true, driverId: id, createdAt: Date.now(), updatedAt: Date.now() });
+      // The car keeps its own photos and registration, so they stay with it if the driver changes.
+      const p = a.photos ?? {};
+      const carPhotos = { front: p.carFront, back: p.carBack, left: p.carLeft, right: p.carRight, techpass: p.techpass };
+      t.set(vehicleRef, { name: a.car, plate: a.plate, capacityKg: a.capacityKg, capacityBoxes: null, active: true, driverId: id, photos: carPhotos, createdAt: Date.now(), updatedAt: Date.now() });
       t.set(staffCol.doc(id), {
         role: "driver",
         name: a.name,
         username: a.username,
         phone: a.phone,
-        photos: a.photos,
+        photos: { passport: a.photos?.passport, license: a.photos?.license, withCar: a.photos?.withCar },
+        photo: a.photos?.withCar ?? null,
         vehicleId: vehicleRef.id,
         ...trust,
         addedAt: Date.now(),
@@ -3233,12 +3237,39 @@ async function handleLogistics(req, res, path, method) {
     await ref.set(data);
     return res.status(201).json({ id: ref.id, ...data });
   }
+  // One car per driver and one driver per car: assigning moves both links in one transaction.
+  const assignMatch = path.match(/^\/api\/vehicles\/([\w-]{1,64})\/assign$/);
+  if (assignMatch && method === "POST") {
+    await requireRole(req, "admin");
+    const driverId = req.body?.driverId ? String(req.body.driverId) : null;
+    await db.runTransaction(async (t) => {
+      const vRef = vehiclesCol.doc(assignMatch[1]);
+      const v = (await t.get(vRef)).data();
+      if (!v) throw new HttpError(404, "Mashina topilmadi");
+      const driver = driverId ? (await t.get(staffCol.doc(driverId))).data() : null;
+      if (driverId && driver?.role !== "driver") throw new HttpError(400, "Haydovchini tanlang");
+      const oldCar = driver?.vehicleId && driver.vehicleId !== vRef.id ? vehiclesCol.doc(driver.vehicleId) : null;
+      const oldCarDoc = oldCar ? (await t.get(oldCar)).data() : null;
+      const oldDriver = v.driverId && v.driverId !== driverId ? staffCol.doc(v.driverId) : null;
+      const oldDriverDoc = oldDriver ? (await t.get(oldDriver)).data() : null;
+      if (oldCar && oldCarDoc) t.update(oldCar, { driverId: null });
+      if (oldDriver && oldDriverDoc) t.update(oldDriver, { vehicleId: null });
+      t.update(vRef, { driverId, updatedAt: Date.now() });
+      if (driverId) t.update(staffCol.doc(driverId), { vehicleId: vRef.id });
+    });
+    return res.json({ ok: true });
+  }
   const vehicleMatch = path.match(/^\/api\/vehicles\/([\w-]{1,64})$/);
   if (vehicleMatch && (method === "PUT" || method === "DELETE")) {
     await requireRole(req, "admin");
     const ref = vehiclesCol.doc(vehicleMatch[1]);
     if (method === "DELETE") {
-      await ref.delete();
+      await db.runTransaction(async (t) => {
+        const v = (await t.get(ref)).data();
+        const driver = v?.driverId ? staffCol.doc(v.driverId) : null;
+        if (driver && (await t.get(driver)).exists) t.update(driver, { vehicleId: null });
+        t.delete(ref);
+      });
       return res.json({ ok: true });
     }
     const data = cleanVehicle(req.body || {});
@@ -3275,7 +3306,7 @@ async function handleLogistics(req, res, path, method) {
       returned,
       routes: routeSnap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => a.createdAt - b.createdAt),
       vehicles: vehicleSnap.docs.map((d) => ({ id: d.id, ...d.data() })),
-      drivers: driverSnap.docs.map((d) => ({ id: d.id, name: d.data().name, username: d.data().username, employment: d.data().employment ?? null, cashAllowed: d.data().cashAllowed === true, vehicleId: d.data().vehicleId ?? null })),
+      drivers: driverSnap.docs.map((d) => ({ id: d.id, name: d.data().name, username: d.data().username, employment: d.data().employment ?? null, cashAllowed: d.data().cashAllowed === true, vehicleId: d.data().vehicleId ?? null, photo: d.data().photo ?? d.data().photos?.withCar ?? null })),
     });
   }
 
@@ -3406,6 +3437,7 @@ const hr = createHr({
   // Straight-line metres for the check-in fence (distanceKm adds the road factor for pricing).
   distanceM: (a, b) => (distanceKm(a, b) / ROAD_FACTOR) * 1000,
   saveBotPhoto,
+  saveBuffer,
   driverToken: () => DRIVER_BOT_TOKEN.value(),
   uuid: randomUUID,
   adminIds: () => idList(ADMIN_IDS.value()),
