@@ -246,7 +246,7 @@ function parseLocation(value) {
 // Price = distance from the warehouse × per-km rate + unloading (every delivery needs a loader)
 // + carrying up the stairs above the first free floors when there is no lift. Admins edit the
 // rates in the mini app; these defaults apply until they do.
-const DELIVERY_DEFAULTS = { perKm: 1500, unloading: 100000, perFloor: 20000, freeFloors: 2, warehouse: null };
+const DELIVERY_DEFAULTS = { perKm: 1500, unloading: 100000, perFloor: 20000, freeFloors: 2, warehouse: null, retryFee: 0, maxAttempts: 2 };
 // Straight-line distance understates city roads; this factor approximates the driven route.
 const ROAD_FACTOR = 1.3;
 
@@ -290,6 +290,9 @@ function cleanDeliverySettings(input) {
     perFloor: money(input.perFloor, "Qavat narxi"),
     freeFloors: floors,
     warehouse: input.warehouse ? parseLocation(input.warehouse) : null,
+    // A failed hand-over (buyer away, short of cash) costs this much for the next trip; 0 = free.
+    retryFee: money(input.retryFee ?? DELIVERY_DEFAULTS.retryFee, "Qayta yetkazish narxi"),
+    maxAttempts: Math.min(5, Math.max(1, Math.round(Number(input.maxAttempts ?? DELIVERY_DEFAULTS.maxAttempts)) || DELIVERY_DEFAULTS.maxAttempts)),
     updatedAt: Date.now(),
   };
 }
@@ -1112,6 +1115,7 @@ async function notifyOrder(id, order) {
 
 // Telegram asks before charging; it must be answered within 10 seconds.
 async function handlePreCheckout(query) {
+  if (String(query.invoice_payload).startsWith("due:")) return handleDuePreCheckout(query);
   const ok = await db.runTransaction(async (t) => {
     const ref = ordersCol.doc(String(query.invoice_payload));
     const snap = await t.get(ref);
@@ -1134,6 +1138,7 @@ async function handlePreCheckout(query) {
 
 async function handleSuccessfulPayment(msg) {
   const pay = msg.successful_payment;
+  if (String(pay.invoice_payload).startsWith("due:")) return handleDuePaid(pay);
   const ref = ordersCol.doc(String(pay.invoice_payload));
   const result = await db.runTransaction(async (t) => {
     const snap = await t.get(ref);
@@ -1245,6 +1250,10 @@ function orderSummary(id, o) {
     refund: o.refund ?? null,
     routeId: o.routeId ?? null,
     handedAt: o.handedAt ?? null,
+    failedAttempts: o.failedAttempts ?? [],
+    deliveryHold: o.deliveryHold ?? false,
+    retryFees: o.retryFees ?? 0,
+    cashCollected: o.cashCollected ?? null,
   };
 }
 
@@ -1270,7 +1279,10 @@ function orderDetail(id, o) {
     goodsTotal: o.goodsTotal ?? o.total,
     delivery: o.delivery ?? null,
     picked: pickLines(o).map((i) => ({ name: i.name, qty: i.qty, sku: i.sku ?? null, boxes: i.boxes ?? 1 })),
-    timeline: steps.filter(([key]) => o[key]).map(([key, text]) => ({ at: o[key], text })).sort((a, b) => a.at - b.at),
+    timeline: [
+      ...steps.filter(([key]) => o[key]).map(([key, text]) => ({ at: o[key], text })),
+      ...(o.failedAttempts ?? []).map((f) => ({ at: f.at, text: `❌ Topshirilmadi: ${FAIL_REASONS[f.reason] ?? f.reason} · ${f.by}` })),
+    ].sort((a, b) => a.at - b.at),
   };
 }
 
@@ -1458,7 +1470,7 @@ async function notifyStage(id, o) {
       : `✅ Mebelingiz ${no} tayyor! Qachon yetkazib beraylik? Qulay vaqtni tanlang:`,
     shipped: pickup
       ? `🏬 Buyurtmangiz ${no} sizga topshirildi. Hammasi joyidami?`
-      : `🚚 Buyurtmangiz ${no} yo'lga chiqdi! Qabul qilganingizda pastdagi tugmani bosing.`,
+      : `🚚 Buyurtmangiz ${no} yo'lga chiqdi! Qabul qilganingizda pastdagi tugmani bosing.${amountDue(o) ? `\n\n💵 Tayyorlab qo'ying: <b>${formatSum(amountDue(o))}</b> naqd.${cardsEnabled() ? " Karta bilan to'lash ham mumkin: haydovchi bot orqali to'lov havolasini yuboradi." : ""}\nPul to'liq bo'lmasa, mebel topshirilmaydi.` : ""}`,
     delivered: `🎉 Rahmat! Buyurtma ${no} yakunlandi. Express Market'ni tanlaganingiz uchun rahmat.`,
   }[o.stage];
   if (!text) return;
@@ -1473,7 +1485,7 @@ async function notifyStage(id, o) {
       : o.stage === "ready" && !pickup
         ? await slotKeyboard(id)
         : undefined;
-  await tg("sendMessage", { chat_id: o.telegramUserId, text, reply_markup: buttons }).catch((err) =>
+  await tg("sendMessage", { chat_id: o.telegramUserId, text, parse_mode: "HTML", reply_markup: buttons }).catch((err) =>
     logger.warn("stage notice failed", err),
   );
 }
@@ -1894,7 +1906,11 @@ function stopView(id, o, weightById) {
     deliverySlot: o.deliverySlot ?? null,
     deliveryLabel: o.deliveryLabel ?? null,
     payment: o.payment,
-    toCollect: o.payment === "cash" ? o.total : 0,
+    toCollect: amountDue(o),
+    dueRequest: o.dueRequest ?? null,
+    failedAttempts: o.failedAttempts?.length ?? 0,
+    lastFail: o.failedAttempts?.at(-1) ?? null,
+    canCard: cardsEnabled(),
     floor: o.delivery?.floor ?? null,
     lift: o.delivery?.lift ?? null,
     lines: o.items.map((i) => `${i.name} × ${i.qty}`),
@@ -1941,33 +1957,195 @@ async function startRoute(id, user) {
   if (waiting.length) throw new HttpError(409, `Omborda hali tayyor emas: ${waiting.map(ORDER_LABEL).join(", ")}. Omborchiga ayting`);
   for (const o of orders.filter((x) => x.stage === "ready")) await setStage(o.id, ["ready"], "shipped", { shippedBy: `🚚 ${staffName(user)}` });
   await routesCol.doc(id).update({ status: "started", startedAt: Date.now() });
+  await advanceRoute(id);
 }
 
-async function handOver(orderId, user) {
+// What the buyer pays at the door: a cash order's total plus any repeat-trip fees.
+const amountDue = (o) => (o.payment === "cash" ? o.total : 0) + (o.retryFees ?? 0);
+const FAIL_REASONS = {
+  absent: "Mijoz uyda yo'q",
+  no_answer: "Telefonni ko'tarmadi",
+  no_address: "Manzil topilmadi",
+  refused: "Mijoz qabul qilmadi",
+  no_money: "To'lov yetmadi",
+};
+
+async function driverStop(orderId, user) {
   const ref = ordersCol.doc(orderId);
   const o = (await ref.get()).data();
   const route = o?.routeId ? (await routesCol.doc(o.routeId).get()).data() : null;
   if (!o || !route || route.driverId !== String(user.id)) throw new HttpError(404, "Buyurtma sizning reysingizda emas");
   if (o.stage !== "shipped") throw new HttpError(409, o.stage === "delivered" ? "Mijoz allaqachon qabul qilgan" : "Avval reysni boshlang");
+  return { ref, o };
+}
+
+const buyerButtons = (id) => ({
+  inline_keyboard: [[{ text: "✅ Qabul qildim", callback_data: `acc:${id}` }], [{ text: "⚠️ Muammo bor", callback_data: `prob:${id}` }]],
+});
+
+// No debt: the furniture leaves the van only when cash plus any card top-up covers what is due.
+async function handOver(orderId, user, body) {
+  const { ref, o } = await driverStop(orderId, user);
   if (o.handedAt) return;
-  await ref.update({ handedAt: Date.now(), handedBy: staffName(user), cashCollected: o.payment === "cash" });
+  const due = amountDue(o);
+  const card = o.dueRequest?.status === "paid" ? o.dueRequest.amount : 0;
+  const cash = due - card > 0 ? Math.round(Number(body.cash)) : 0;
+  if (!(cash >= 0)) throw new HttpError(400, "Olingan naqd summani kiriting");
+  if (cash + card < due) {
+    throw new HttpError(409, `To'liq emas: yana ${formatSum(due - cash - card)} kerak. «Qolganini karta bilan» yoki «Topshirib bo'lmadi» ni tanlang`);
+  }
+  await ref.update({ handedAt: Date.now(), handedBy: staffName(user), cashCollected: cash });
   if (o.telegramUserId) {
     await tg("sendMessage", {
       chat_id: o.telegramUserId,
       text: `🤝 Haydovchi buyurtmangiz ${ORDER_LABEL(o)} ni topshirdi. Hammasi joyidami?`,
-      reply_markup: { inline_keyboard: [[{ text: "✅ Qabul qildim", callback_data: `acc:${orderId}` }], [{ text: "⚠️ Muammo bor", callback_data: `prob:${orderId}` }]] },
+      reply_markup: buyerButtons(orderId),
     }).catch((err) => logger.warn("handover notice failed", err));
   }
-  const routeRef = routesCol.doc(o.routeId);
-  const stops = (await db.getAll(...route.orderIds.map((oid) => ordersCol.doc(oid)))).map((x) => x.data());
-  const open = stops.filter((x) => x && x.status !== "cancelled" && !x.handedAt && x.stage !== "delivered");
+  await advanceRoute(o.routeId);
+}
+
+// The buyer could not take the order: it goes back to the warehouse and off the route. The buyer
+// picks a new window (paying the repeat-trip fee) until the attempts run out; then an admin decides.
+async function failStop(orderId, user, body) {
+  const reason = FAIL_REASONS[body.reason] ? body.reason : null;
+  if (!reason) throw new HttpError(400, "Sababni tanlang");
+  const { ref, o } = await driverStop(orderId, user);
+  if (o.handedAt) throw new HttpError(409, "Bu buyurtma topshirilgan");
+  const settings = await deliverySettings();
+  const attempts = [...(o.failedAttempts ?? []), { at: Date.now(), reason, by: staffName(user), routeId: o.routeId }];
+  const hold = reason === "refused" || attempts.length >= settings.maxAttempts;
+  const fee = hold ? 0 : settings.retryFee;
+  await ref.update({
+    stage: "ready",
+    stageAt: Date.now(),
+    routeId: null,
+    deliverySlot: null,
+    deliveryLabel: null,
+    dueRequest: null,
+    // The slot reminders count from the return to the warehouse, not from the first readiness.
+    readyAt: Date.now(),
+    slotReminders: 0,
+    slotEscalatedAt: null,
+    failedAttempts: attempts,
+    retryFees: (o.retryFees ?? 0) + fee,
+    deliveryHold: hold,
+  });
+  const no = ORDER_LABEL(o);
+  const why = FAIL_REASONS[reason].toLowerCase();
+  if (o.telegramUserId) {
+    const text = hold
+      ? `😔 Buyurtmangiz ${no} ni topshira olmadik (${why}). Mebel omborimizda xavfsiz saqlanmoqda, keyingi qadam bo'yicha siz bilan bog'lanamiz.`
+      : `🚚 Bugun buyurtmangiz ${no} ni topshira olmadik (${why}). Mebel omborimizda.\nQayta yetkazish uchun qulay vaqtni tanlang${fee ? ` (qayta yetkazish: ${formatSum(fee)})` : ""}:`;
+    await tg("sendMessage", { chat_id: o.telegramUserId, text, reply_markup: hold ? undefined : await slotKeyboard(orderId) }).catch((err) =>
+      logger.warn("failed delivery notice failed", err),
+    );
+  }
+  if (hold) {
+    await tg("sendMessage", {
+      chat_id: ordersChat(),
+      text: `⚠️ ${no} ${attempts.length}-marta topshirilmadi: ${FAIL_REASONS[reason]}. Mebel omborga qaytdi. Mijoz bilan gaplashing: qayta yuborish yoki bekor qilish (panel → buyurtma).`,
+    }).catch((err) => logger.warn("hold notice failed", err));
+  }
+  await advanceRoute(o.routeId);
+}
+
+// Card top-up at the door: the bot sends the buyer an invoice for what the cash did not cover.
+async function requestCardDue(orderId, user, body) {
+  if (!cardsEnabled()) throw new HttpError(400, "Karta to'lovi hali ulanmagan");
+  const { ref, o } = await driverStop(orderId, user);
+  if (o.handedAt) throw new HttpError(409, "Bu buyurtma topshirilgan");
+  const cash = Math.max(0, Math.round(Number(body.cash)) || 0);
+  const rest = amountDue(o) - cash;
+  if (rest <= 0) throw new HttpError(400, "Naqd yetarli: «Topshirdim» ni bosing");
+  if (!o.telegramUserId) throw new HttpError(400, "Mijoz Telegram'da emas: karta havolasini yuborib bo'lmaydi");
+  const link = await tg("createInvoiceLink", {
+    title: `Express Market ${ORDER_LABEL(o)}`,
+    description: `Yetkazishda to'lov: ${formatSum(rest)}`,
+    payload: `due:${orderId}`,
+    provider_token: providerToken(),
+    currency: "UZS",
+    prices: [{ label: "Qolgan summa", amount: rest * UZS_MINOR }],
+  }).catch((err) => {
+    logger.error("due invoice failed", err);
+    throw new HttpError(502, "To'lov havolasini yaratib bo'lmadi. Naqd oling yoki «Topshirib bo'lmadi» ni tanlang");
+  });
+  await ref.update({ dueRequest: { amount: rest, cash, status: "awaiting", at: Date.now() } });
+  await tg("sendMessage", {
+    chat_id: o.telegramUserId,
+    text: `💳 Buyurtma ${ORDER_LABEL(o)}: qolgan ${formatSum(rest)} ni karta bilan to'lang. To'lov o'tishi bilan haydovchi mebelni topshiradi.`,
+    reply_markup: { inline_keyboard: [[{ text: `💳 ${formatSum(rest)} to'lash`, url: link }]] },
+  });
+}
+
+async function handleDuePreCheckout(query) {
+  const id = String(query.invoice_payload).slice(4);
+  const o = (await ordersCol.doc(id).get()).data();
+  const ok =
+    o?.dueRequest?.status === "awaiting" &&
+    o.telegramUserId === query.from.id &&
+    query.currency === "UZS" &&
+    query.total_amount === o.dueRequest.amount * UZS_MINOR;
+  await tg("answerPreCheckoutQuery", {
+    pre_checkout_query_id: query.id,
+    ok,
+    ...(ok ? {} : { error_message: "Bu to'lov havolasi eskirgan. Haydovchidan yangisini so'rang." }),
+  });
+}
+
+async function handleDuePaid(pay) {
+  const id = String(pay.invoice_payload).slice(4);
+  const ref = ordersCol.doc(id);
+  const o = (await ref.get()).data();
+  if (!o?.dueRequest || o.dueRequest.status === "paid") return;
+  await ref.update({
+    dueRequest: {
+      ...o.dueRequest,
+      status: "paid",
+      paidAt: Date.now(),
+      telegramChargeId: pay.telegram_payment_charge_id,
+      providerChargeId: pay.provider_payment_charge_id,
+    },
+  });
+  const route = o.routeId ? (await routesCol.doc(o.routeId).get()).data() : null;
+  if (!route) return;
+  await tg("sendMessage", {
+    chat_id: route.driverId,
+    text: `✅ ${ORDER_LABEL(o)}: ${formatSum(o.dueRequest.amount)} karta bilan to'landi. Mebelni topshirishingiz mumkin.`,
+  }).catch((err) => logger.warn("due paid notice failed", err));
+}
+
+// After every stop: warn the next buyer the driver is coming, or close the route with a cash report.
+async function advanceRoute(routeId) {
+  const routeRef = routesCol.doc(routeId);
+  const route = (await routeRef.get()).data();
+  if (!route || route.status !== "started") return;
+  const snaps = await db.getAll(...route.orderIds.map((id) => ordersCol.doc(id)));
+  const stops = snaps.filter((x) => x.exists).map((x) => ({ id: x.id, ...x.data() }));
+  const open = stops.filter((x) => x.routeId === routeId && x.status !== "cancelled" && !x.handedAt && x.stage === "shipped");
+  const next = open[0];
+  if (next && !next.comingNoticeAt && next.telegramUserId) {
+    await ordersCol.doc(next.id).update({ comingNoticeAt: Date.now() });
+    await tg("sendMessage", {
+      chat_id: next.telegramUserId,
+      text: `🚚 Haydovchi ${ORDER_LABEL(next)} buyurtmangiz bilan sizga kelyapti, siz navbatdagi manzilsiz. Iltimos, uyda bo'ling: u kelishdan oldin qo'ng'iroq qiladi.${amountDue(next) ? `\n💵 To'lov: ${formatSum(amountDue(next))}.` : ""}`,
+    }).catch((err) => logger.warn("coming notice failed", err));
+  }
   if (open.length) return;
   await routeRef.update({ status: "done", finishedAt: Date.now() });
-  const cash = stops.filter((x) => x?.payment === "cash" && x.status !== "cancelled").reduce((n, x) => n + x.total, 0);
-  await tg("sendMessage", {
-    chat_id: ordersChat(),
-    text: `✅ Reys tugadi: ${route.driverName}, ${route.vehicleName}, ${route.orderIds.length} ta manzil.${cash ? `\n💵 Naqd: ${cash.toLocaleString("ru-RU")} so'm — kassaga topshirish kerak.` : ""}`,
-  }).catch((err) => logger.warn("route done notice failed", err));
+  const handed = stops.filter((x) => x.handedAt && x.routeId === routeId);
+  const failed = stops.filter((x) => x.failedAttempts?.some((a) => a.routeId === routeId));
+  const expected = handed.reduce((n, x) => n + amountDue(x) - (x.dueRequest?.status === "paid" ? x.dueRequest.amount : 0), 0);
+  const cash = handed.reduce((n, x) => n + (x.cashCollected ?? 0), 0);
+  const failedText = failed.map((x) => `${ORDER_LABEL(x)} (${FAIL_REASONS[x.failedAttempts.at(-1).reason].toLowerCase()})`).join(", ");
+  const lines = [
+    `✅ Reys tugadi: ${route.driverName}, ${route.vehicleName}.`,
+    `Topshirildi: ${handed.length} ta${failed.length ? ` · topshirilmadi: ${failedText}` : ""}.`,
+    cash || expected
+      ? `💵 Haydovchidagi naqd: ${formatSum(cash)} — kassaga topshirish kerak.${cash !== expected ? ` Kutilgan: ${formatSum(expected)}, farq ${formatSum(cash - expected)}.` : ""}`
+      : "",
+  ];
+  await tg("sendMessage", { chat_id: ordersChat(), text: lines.filter(Boolean).join("\n") }).catch((err) => logger.warn("route done notice failed", err));
 }
 
 async function handleLogistics(req, res, path, method) {
@@ -2011,11 +2189,18 @@ async function handleLogistics(req, res, path, method) {
       .map((d) => stopView(d.id, d.data(), weights))
       .filter((o) => o.status !== "cancelled" && o.stage !== null)
       .sort((a, b) => a.deliverySlot.localeCompare(b.deliverySlot));
+    // Stops sent back to the warehouse lost their slot, so the day query misses them; the route
+    // cards still list them, marked as not delivered.
+    const known = new Set(orders.map((o) => o.id));
+    const missing = routeSnap.docs.flatMap((d) => d.data().orderIds).filter((id) => !known.has(id));
+    const back = missing.length ? await db.getAll(...missing.map((id) => ordersCol.doc(id))) : [];
+    const returned = back.filter((x) => x.exists).map((x) => stopView(x.id, x.data(), weights));
     return res.json({
       date,
       dateLabel: dayLabel(new Date(`${date}T00:00:00Z`)),
       warehouse: settings.warehouse,
       orders,
+      returned,
       routes: routeSnap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => a.createdAt - b.createdAt),
       vehicles: vehicleSnap.docs.map((d) => ({ id: d.id, ...d.data() })),
       drivers: driverSnap.docs.map((d) => ({ id: d.id, name: d.data().name, username: d.data().username })),
@@ -2100,10 +2285,12 @@ async function handleLogistics(req, res, path, method) {
     await startRoute(startMatch[1], user);
     return res.json(await driverRoutes(user));
   }
-  const handMatch = path.match(/^\/api\/driver\/stops\/([\w-]{1,64})\/handed$/);
-  if (handMatch && method === "POST") {
+  const stopMatch = path.match(/^\/api\/driver\/stops\/([\w-]{1,64})\/(handed|failed|card)$/);
+  if (stopMatch && method === "POST") {
     const { user } = await requireDriver(req);
-    await handOver(handMatch[1], user);
+    const [, id, action] = stopMatch;
+    const act = { handed: handOver, failed: failStop, card: requestCardDue }[action];
+    await act(id, user, req.body || {});
     return res.json(await driverRoutes(user));
   }
   return null;
@@ -2338,7 +2525,8 @@ async function route(req, res) {
     await requireRole(req, "admin");
     if (method === "GET") return res.json(await deliverySettings());
     if (method === "PUT") {
-      const next = cleanDeliverySettings(req.body || {});
+      // Merge over the stored rates: the mini app sheet edits only some of them.
+      const next = cleanDeliverySettings({ ...(await deliverySettings()), ...(req.body || {}) });
       await deliveryRef.set(next);
       return res.json(next);
     }
@@ -2394,7 +2582,7 @@ async function route(req, res) {
     return res.json(list.slice(0, ORDER_LIST_LIMIT));
   }
 
-  const orderMatch = path.match(/^\/api\/orders\/([\w-]{1,64})(?:\/(buyer-cancel|admin-cancel|reject-cancel|refunded))?$/);
+  const orderMatch = path.match(/^\/api\/orders\/([\w-]{1,64})(?:\/(buyer-cancel|admin-cancel|reject-cancel|refunded|retry-delivery))?$/);
   if (orderMatch && orderMatch[1] !== "mine") {
     const [, id, action] = orderMatch;
     const { user, role } = await authenticate(req);
@@ -2417,6 +2605,21 @@ async function route(req, res) {
     if (action === "reject-cancel" && method === "POST") {
       await rejectCancel(id, by);
       return res.json({ ok: true });
+    }
+    // After the attempts ran out and the buyer was reached: offer the calendar once more.
+    if (action === "retry-delivery" && method === "POST") {
+      const ref = ordersCol.doc(id);
+      const o = (await ref.get()).data();
+      if (!o?.deliveryHold || o.stage !== "ready") throw new HttpError(409, "Bu buyurtma qayta yetkazishni kutmayapti");
+      await ref.update({ deliveryHold: false, readyAt: Date.now(), slotReminders: 0, slotEscalatedAt: null });
+      if (o.telegramUserId) {
+        await tg("sendMessage", {
+          chat_id: o.telegramUserId,
+          text: `🚚 Buyurtmangiz ${ORDER_LABEL(o)} ni qayta yetkazamiz. Qulay vaqtni tanlang:`,
+          reply_markup: await slotKeyboard(id),
+        }).catch((err) => logger.warn("retry notice failed", err));
+      }
+      return res.json(orderDetail(id, { ...o, deliveryHold: false }));
     }
     if (action === "refunded" && method === "POST") {
       const ref = ordersCol.doc(id);
@@ -2501,7 +2704,7 @@ export const remindSlots = onSchedule(
     const snap = await ordersCol.where("stage", "==", "ready").get();
     for (const doc of snap.docs) {
       const o = doc.data();
-      if (o.orderType !== "delivery" || o.deliverySlot || !o.telegramUserId) continue;
+      if (o.orderType !== "delivery" || o.deliverySlot || !o.telegramUserId || o.deliveryHold) continue;
       const sent = o.slotReminders ?? 0;
       try {
         if (!o.slotEscalatedAt && o.readyAt < now - SLOT_ESCALATE_MS) {
@@ -2530,7 +2733,9 @@ export const closeShipped = onSchedule(
     const handedCutoff = Date.now() - HANDED_CLOSE_MS;
     const snap = await ordersCol.where("stage", "==", "shipped").get();
     for (const doc of snap.docs) {
-      const { stageAt, handedAt } = doc.data();
+      const { stageAt, handedAt, routeId } = doc.data();
+      // On a route only the driver's hand-over counts: an open stop waits for the driver, not the clock.
+      if (routeId && !handedAt) continue;
       if (stageAt >= cutoff && !(handedAt && handedAt < handedCutoff)) continue;
       await setStage(doc.id, ["shipped"], "delivered", { autoClosed: true }).catch((err) => logger.warn("auto close failed", err));
     }

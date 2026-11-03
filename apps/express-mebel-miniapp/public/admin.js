@@ -82,6 +82,7 @@ function orderState(o) {
   if (o.status === "paid_after_cancel") return ["To'lov kech keldi", "bad"];
   if (o.status === "cancelled") return STAGE.cancelled;
   if (o.stage === null) return ["To'lov kutilmoqda", ""];
+  if (o.deliveryHold && o.stage === "ready") return ["Topshirilmadi: qaror kerak", "bad"];
   return STAGE[o.stage] || [o.stage, ""];
 }
 
@@ -195,7 +196,8 @@ views.dashboard = async (page, tools) => {
   const low = goods().filter((p) => p.stock <= 3).sort((a, b) => a.stock - b.stock);
   const asks = active.filter((o) => o.cancelRequest);
   const refunds = (await ordersFor(90)).filter((o) => o.refund?.status === "pending");
-  const noSlot = active.filter((o) => o.stage === "ready" && o.orderType === "delivery" && !o.deliveryLabel);
+  const noSlot = active.filter((o) => o.stage === "ready" && o.orderType === "delivery" && !o.deliveryLabel && !o.deliveryHold);
+  const held = active.filter((o) => o.stage === "ready" && o.deliveryHold);
   const top = topProducts(sales).slice(0, 5);
   const pipeline = ["new", "picking", "ready", "shipped"].map((s) => [s, active.filter((o) => o.stage === s).length]);
   page.innerHTML = `
@@ -214,6 +216,7 @@ views.dashboard = async (page, tools) => {
         <li><span>🙋 Bekor qilish so'rovlari</span><a href="#orders">${asks.length}</a></li>
         <li><span>💳 Pul qaytarish kutilmoqda</span><a href="#accounting">${refunds.length}</a></li>
         <li><span>⏳ Tayyor, vaqt tanlanmagan</span><a href="#orders">${noSlot.length}</a></li>
+        <li><span>🚚 Topshirilmadi, qaror kerak</span><a href="#logistics">${held.length}</a></li>
         <li><span>📦 Kam qolgan mahsulotlar (≤ 3)</span><a href="#stock">${low.length}</a></li>
       </ul></div>
       <div class="card"><h3>Eng ko'p sotilgan · ${state.period} kun</h3>${hbars(top.map((t) => ({ label: `${t.name} × ${t.qty}`, value: t.revenue, text: `${sum(t.revenue)}` })))}</div>
@@ -318,9 +321,12 @@ function openOrder(id) {
         ${o.address ? `<dt>Manzil</dt><dd>${esc(o.address)}${o.location ? ` · <a target="_blank" rel="noopener" href="https://maps.google.com/?q=${o.location.lat},${o.location.lon}">xarita</a>` : ""}</dd>` : ""}
         ${o.deliveryLabel ? `<dt>Vaqt</dt><dd>🗓 ${esc(o.deliveryLabel)}</dd>` : ""}
         ${o.comment ? `<dt>Izoh</dt><dd>${esc(o.comment)}</dd>` : ""}
+        ${o.failedAttempts?.length ? `<dt>Topshirilmadi</dt><dd>${o.failedAttempts.length} marta${o.retryFees ? ` · qayta yetkazish ${sum(o.retryFees)} so'm` : ""}</dd>` : ""}
+        ${o.cashCollected ? `<dt>Haydovchi oldi</dt><dd>💵 ${sum(o.cashCollected)} so'm naqd</dd>` : ""}
         ${o.refund ? `<dt>Qaytarish</dt><dd>💳 ${sum(o.refund.amount)} so'm · ${o.refund.status === "done" ? "qaytarildi" : "kutilmoqda"}</dd>` : ""}
       </dl>
       ${o.cancelRequest ? `<p class="note">🙋 Mijoz bekor qilishni so'ragan: ${esc(o.cancelRequest.reason)}</p>` : ""}
+      ${o.deliveryHold && o.stage === "ready" ? `<p class="note">⚠️ Mebel ${o.failedAttempts.length} marta topshirilmadi va omborga qaytdi. Mijoz bilan gaplashing: qayta yetkazish yoki bekor qilish.</p>` : ""}
       <h3 style="margin:16px 0 10px">Ombor terish ro'yxati</h3>
       <ul class="list">${o.picked.map((p) => `<li><span>${esc(p.name)} <span class="muted">SKU ${p.sku ?? "—"}</span></span><span>${p.qty} × ${p.boxes} quti</span></li>`).join("")}</ul>
       <h3 style="margin:16px 0 10px">Tarix</h3>
@@ -332,6 +338,7 @@ function openOrder(id) {
       o.cancelRequest ? '<button class="btn btn--danger" data-act="approve">✅ Bekor qilishni tasdiqlash</button><button class="btn btn--ghost" data-act="reject">↩️ So\'rovni rad etish</button>' : "",
       can && !o.cancelRequest ? '<input class="input" id="cancelReason" placeholder="Bekor qilish sababi" style="flex:1;min-width:200px"/><button class="btn btn--ghost" data-act="cancel">❌ Bekor qilish</button>' : "",
       o.refund?.status === "pending" ? '<button class="btn" data-act="refunded">💳 Pul qaytarildi</button>' : "",
+      o.deliveryHold && o.stage === "ready" ? '<button class="btn" data-act="retry">🚚 Qayta yetkazish (mijozga kalendar boradi)</button>' : "",
     ].join("");
     acts.onclick = async (e) => {
       const act = e.target.closest("[data-act]")?.dataset.act;
@@ -341,6 +348,7 @@ function openOrder(id) {
         reject: () => api(`/api/orders/${id}/reject-cancel`, { method: "POST" }),
         cancel: () => api(`/api/orders/${id}/admin-cancel`, { method: "POST", body: { reason: $("#cancelReason", body).value } }),
         refunded: () => api(`/api/orders/${id}/refunded`, { method: "POST" }),
+        retry: () => api(`/api/orders/${id}/retry-delivery`, { method: "POST" }),
       }[act];
       try {
         await call();
@@ -986,6 +994,7 @@ views.crm = async (page, tools) => {
 // ---------- logistics: plan a day's routes ----------
 // Pick a day, tick that day's delivery orders, choose a driver and a vehicle: the server orders the
 // stops (morning window first, nearest next) and the driver works the route in the mini app.
+const FAIL_TEXT = { absent: "uyda yo'q", no_answer: "telefonni ko'tarmadi", no_address: "manzil topilmadi", refused: "qabul qilmadi", no_money: "pul yetmadi" };
 const ROUTE_STATUS = { planned: ["Rejada", ""], started: ["Yo'lda", "teal"], done: ["Tugadi", "ok"] };
 const kg = (n) => `${Math.round(n * 10) / 10} kg`;
 let logisticsDate = null;
@@ -1007,7 +1016,7 @@ function capacityNote(load, vehicle) {
 }
 
 const stopLine = (o, i) =>
-  `<li data-order="${o.id}" style="cursor:pointer"><span>${i === undefined ? "" : `<b>${i + 1}.</b> `}<b>${no(o)}</b> ${esc(o.name)} · ${esc((o.deliveryLabel || "").split(", ").at(-1))}<br><span class="muted">${esc(o.address || "manzil yo'q")}${o.location ? "" : " · 📍 lokatsiya yo'q"} · ${o.boxes} quti${o.weight ? ` · ${kg(o.weight)}` : ""}${o.toCollect ? ` · naqd ${sum(o.toCollect)}` : ""}</span></span><span>${o.handedAt ? pill(["Topshirildi", "ok"]) : pill(orderState(o))}</span></li>`;
+  `<li data-order="${o.id}" style="cursor:pointer"><span>${i === undefined ? "" : `<b>${i + 1}.</b> `}<b>${no(o)}</b> ${esc(o.name)} · ${esc((o.deliveryLabel || "").split(", ").at(-1))}<br><span class="muted">${esc(o.address || "manzil yo'q")}${o.location ? "" : " · 📍 lokatsiya yo'q"} · ${o.boxes} quti${o.weight ? ` · ${kg(o.weight)}` : ""}${o.toCollect ? ` · naqd ${sum(o.toCollect)}` : ""}</span></span><span>${o.handedAt ? pill(["Topshirildi", "ok"]) : o.lastFail && !o.routeId ? pill([`Topshirilmadi: ${FAIL_TEXT[o.lastFail.reason]}`, "bad"]) : pill(orderState(o))}</span></li>`;
 
 views.logistics = async (page, tools) => {
   const days = Array.from({ length: 8 }, (_, i) => dayKey(Date.now() + i * DAY));
@@ -1019,10 +1028,11 @@ views.logistics = async (page, tools) => {
     logisticsDate = b.dataset.day;
     render();
   };
-  const plan = await api(`/api/logistics?date=${logisticsDate}`);
+  const [plan, recent] = await Promise.all([api(`/api/logistics?date=${logisticsDate}`), ordersFor(90)]);
+  const held = recent.filter((o) => o.stage === "ready" && o.deliveryHold && o.status !== "cancelled");
   const free = plan.orders.filter((o) => !o.routeId && ["new", "picking", "ready"].includes(o.stage));
   const vehicles = plan.vehicles.filter((v) => v.active !== false);
-  const byOrder = new Map(plan.orders.map((o) => [o.id, o]));
+  const byOrder = new Map([...plan.orders, ...plan.returned].map((o) => [o.id, o]));
   const routeCard = (r) => {
     const stops = r.orderIds.map((id) => byOrder.get(id)).filter(Boolean);
     const load = routeLoad(stops);
@@ -1059,6 +1069,7 @@ views.logistics = async (page, tools) => {
       </div>
       ${plan.routes.map(routeCard).join("")}
     </div>
+    ${held.length ? `<div class="card" style="margin-top:16px"><h3>⚠️ Topshirilmadi, qaror kerak (${held.length})</h3><ul class="list">${held.map((o) => `<li data-order="${o.id}" style="cursor:pointer"><span><b>${no(o)}</b> ${esc(o.name)} · ${esc(o.phone)}<br><span class="muted">${o.failedAttempts.length} marta topshirilmadi · oxirgisi: ${esc(FAIL_TEXT[o.failedAttempts.at(-1)?.reason] ?? "")}</span></span>${pill(orderState(o))}</li>`).join("")}</ul></div>` : ""}
     <div class="grid cols-2" style="margin-top:16px">
       <div class="card"><h3>🚐 Mashinalar</h3><ul class="list">${
         plan.vehicles.map((v) => `<li data-vehicle="${v.id}" style="cursor:pointer"><span><b>${esc(v.name)}</b> ${esc(v.plate)}<br><span class="muted">${v.capacityKg ? kg(v.capacityKg) : "sig'imi kiritilmagan"}${v.capacityBoxes ? ` · ${v.capacityBoxes} quti` : ""}</span></span>${v.active === false ? pill(["O'chirilgan", ""]) : pill(["Faol", "ok"])}</li>`).join("") || '<li class="muted">Hali mashina yo\'q</li>'
@@ -1286,6 +1297,11 @@ views.settings = async (page) => {
             <label class="field">Liftsiz, har qavat (so'm)<input class="input" name="perFloor" type="number" min="0" value="${cfg.perFloor}" /></label>
             <label class="field">Bepul qavatlar<input class="input" name="freeFloors" type="number" min="0" max="30" value="${cfg.freeFloors}" /></label>
           </div>
+          <div class="row2">
+            <label class="field">Qayta yetkazish narxi (so'm, 0 = bepul)<input class="input" name="retryFee" type="number" min="0" value="${cfg.retryFee}" /></label>
+            <label class="field">Topshirish urinishlari<input class="input" name="maxAttempts" type="number" min="1" max="5" value="${cfg.maxAttempts}" /></label>
+          </div>
+          <p class="muted">Mijoz uyda bo'lmasa yoki puli yetmasa, mebel omborga qaytadi va mijoz yangi vaqt tanlaydi. Urinishlar tugasa, buyurtma "qaror kerak" bo'ladi. Qarzga berilmaydi.</p>
           <label class="field">Ombor lokatsiyasi<input class="input" name="warehouse" placeholder="41.311, 69.279 yoki Google Maps havolasi" value="${cfg.warehouse ? `${cfg.warehouse.lat}, ${cfg.warehouse.lon}` : ""}" /></label>
           ${cfg.warehouse ? `<p class="muted"><a target="_blank" rel="noopener" href="https://maps.google.com/?q=${cfg.warehouse.lat},${cfg.warehouse.lon}">Xaritada ko'rish</a></p>` : '<p class="note">⚠️ Ombor lokatsiyasi kiritilmagan: masofa narxi hisoblanmayapti. Google Maps\'da omborni o\'ng tugma bilan bosing, koordinatani nusxalab shu yerga qo\'ying.</p>'}
           <button class="btn" type="submit" style="margin-top:8px">Saqlash</button>
@@ -1336,7 +1352,7 @@ views.settings = async (page) => {
     // Yandex links put longitude first; in Uzbekistan latitude is the smaller number.
     const warehouse = m ? (a > b ? { lat: b, lon: a } : { lat: a, lon: b }) : null;
     try {
-      await api("/api/delivery/settings", { method: "PUT", body: { perKm: f.get("perKm"), unloading: f.get("unloading"), perFloor: f.get("perFloor"), freeFloors: f.get("freeFloors"), warehouse } });
+      await api("/api/delivery/settings", { method: "PUT", body: { perKm: f.get("perKm"), unloading: f.get("unloading"), perFloor: f.get("perFloor"), freeFloors: f.get("freeFloors"), retryFee: f.get("retryFee"), maxAttempts: f.get("maxAttempts"), warehouse } });
       toast("Saqlandi");
       render();
     } catch (err) {

@@ -1346,8 +1346,8 @@ function panelLinkSheet(body) {
 // ---------- driver: today's routes ----------
 const ROUTE_STATUS = { planned: "Rejada", started: "Yo'lda", done: "Tugadi" };
 // Google Maps takes up to 9 waypoints in a link; longer routes open stop by stop.
-function routeMapLink(stops) {
-  const pts = stops.filter((s) => s.location && !s.handedAt && s.stage !== "delivered").map((s) => `${s.location.lat},${s.location.lon}`);
+function routeMapLink(route) {
+  const pts = route.stops.filter((s) => s.location && !stopClosed(s, route)).map((s) => `${s.location.lat},${s.location.lon}`);
   if (!pts.length) return null;
   const dest = pts.pop();
   const way = pts.slice(0, 9).join("|");
@@ -1355,21 +1355,50 @@ function routeMapLink(stops) {
 }
 const openExternal = (url) => (tg?.openLink ? tg.openLink(url) : window.open(url, "_blank"));
 
+const FAIL_REASONS = [
+  ["absent", "🏠 Uyda yo'q"],
+  ["no_answer", "📵 Telefonni ko'tarmadi"],
+  ["no_address", "🗺 Manzil topilmadi"],
+  ["no_money", "💵 Pul yetmadi"],
+  ["refused", "🙅 Qabul qilmadi"],
+];
+const FAIL_TEXT = Object.fromEntries(FAIL_REASONS);
+// A stop is closed for the driver once handed over, confirmed, or sent back to the warehouse.
+const stopFailed = (s, route) => s.lastFail && s.routeId !== route.id;
+const stopClosed = (s, route) => s.handedAt || s.stage === "delivered" || stopFailed(s, route);
+
 function stopHtml(s, i, route) {
-  const done = s.handedAt || s.stage === "delivered";
-  const pay = s.toCollect ? `💵 Naqd oling: <b>${sum(s.toCollect)} so'm</b>` : "💳 To'langan";
+  const failed = stopFailed(s, route);
+  const closed = stopClosed(s, route);
+  const card = s.dueRequest?.status === "paid" ? s.dueRequest.amount : 0;
+  const rest = Math.max(0, s.toCollect - card);
+  const pay = s.toCollect ? `💵 Olinadi: <b>${sum(s.toCollect)} so'm</b>${card ? ` · 💳 karta ${sum(card)} to'landi` : ""}` : "💳 To'langan";
   const floor = s.floor ? ` · ${s.floor}-qavat${s.lift ? ", lift bor" : s.floor > 2 ? ", liftsiz" : ""}` : "";
-  return `<div class="stop${done ? " stop--done" : ""}">
-    <div class="stop-head"><span class="stop-no">${done ? "✓" : i + 1}</span><b>#${s.number} · ${esc(s.name)}</b><small>${esc((s.deliveryLabel || "").split(", ").at(-1))}</small></div>
+  const open = route.status === "started" && !closed;
+  const waiting = s.dueRequest?.status === "awaiting";
+  return `<div class="stop${closed ? " stop--done" : ""}" data-stop="${s.id}">
+    <div class="stop-head"><span class="stop-no">${failed ? "✕" : closed ? "✓" : i + 1}</span><b>#${s.number} · ${esc(s.name)}</b><small>${esc((s.deliveryLabel || "").split(", ").at(-1))}</small></div>
+    ${failed ? `<p><b>Topshirilmadi:</b> ${esc(FAIL_TEXT[s.lastFail.reason] || s.lastFail.reason)} · omborga qaytadi</p>` : ""}
     <p>${esc(s.address || "Manzil yozilmagan")}${floor}</p>
     ${s.comment ? `<p class="hint">💬 ${esc(s.comment)}</p>` : ""}
     <p class="hint">${esc(s.lines.join(", "))} · ${s.boxes} quti${s.weight ? ` · ${s.weight} kg` : ""}</p>
-    <p>${pay}</p>
+    ${failed ? "" : `<p>${pay}</p>`}
     <div class="stop-acts">
       <a class="btn btn--ghost" href="tel:${esc(s.phone)}">📞 ${esc(s.phone)}</a>
       ${s.location ? `<button class="btn btn--ghost" data-map="${s.location.lat},${s.location.lon}">📍 Xarita</button>` : ""}
-      ${route.status === "started" && !done ? `<button class="btn" data-hand="${s.id}" data-no="${s.number}" data-cash="${s.toCollect}">🤝 Topshirdim</button>` : ""}
     </div>
+    ${
+      open
+        ? `${waiting ? `<p class="hint">⏳ Mijoz ${sum(s.dueRequest.amount)} so'mni karta bilan to'lashi kutilmoqda.</p><div class="stop-acts"><button class="btn btn--ghost" data-refresh>🔄 To'landimi? Tekshirish</button></div>` : ""}
+           ${rest ? `<label class="field">Olingan naqd, so'm<input type="number" inputmode="numeric" min="0" data-cash value="${waiting ? s.dueRequest.cash : rest}" /></label>` : ""}
+           <div class="stop-acts">
+             <button class="btn" data-hand="${s.id}" data-no="${s.number}">🤝 Topshirdim</button>
+             ${rest && s.canCard && !waiting ? `<button class="btn btn--ghost" data-card="${s.id}">💳 Qolganini karta bilan</button>` : ""}
+             <button class="btn btn--ghost" data-fail-open>❌ Topshirib bo'lmadi</button>
+           </div>
+           <div class="stop-acts" data-fail-list hidden>${FAIL_REASONS.map(([k, label]) => `<button class="btn btn--ghost" data-fail="${k}">${label}</button>`).join("")}</div>`
+        : ""
+    }
   </div>`;
 }
 
@@ -1382,10 +1411,10 @@ function routesSheet(body) {
         : routes.length
           ? routes
               .map((r) => {
-                const left = r.stops.filter((s) => !s.handedAt && s.stage !== "delivered").length;
+                const left = r.stops.filter((s) => !stopClosed(s, r)).length;
                 const cash = r.stops.reduce((n, s) => n + s.toCollect, 0);
                 const boxes = r.stops.reduce((n, s) => n + s.boxes, 0);
-                const map = routeMapLink(r.stops);
+                const map = routeMapLink(r);
                 return `<section class="route">
                   <div class="route-head"><b>${esc(r.dateLabel)}</b><span class="chip">${ROUTE_STATUS[r.status]}</span></div>
                   <p class="hint">${esc(r.vehicleName)} · ${r.stops.length} ta manzil · ${boxes} quti${r.km ? ` · ~${r.km} km` : ""}${cash ? ` · naqd ${sum(cash)} so'm` : ""}</p>
@@ -1407,10 +1436,30 @@ function routesSheet(body) {
         routes = list;
         draw();
       })
-      .catch((err) => toast(err.message));
+      .catch((err) => {
+        toast(err.message);
+        draw();
+      });
   body.onclick = async (e) => {
     const start = e.target.closest("[data-start]");
     const hand = e.target.closest("[data-hand]");
+    const stop = e.target.closest("[data-stop]");
+    const cashOf = () => stop?.querySelector("[data-cash]")?.value ?? 0;
+    if (e.target.closest("[data-fail-open]")) {
+      stop.querySelector("[data-fail-list]").hidden = !stop.querySelector("[data-fail-list]").hidden;
+      return;
+    }
+    if (e.target.closest("[data-refresh]")) return run(api("/api/driver/routes"));
+    const fail = e.target.closest("[data-fail]");
+    if (fail) {
+      if (!(await confirmDialog(`${FAIL_TEXT[fail.dataset.fail]}: mebel omborga qaytariladi, mijozga yangi vaqt tanlash taklif qilinadi. Tasdiqlaysizmi?`))) return;
+      return run(api(`/api/driver/stops/${stop.dataset.stop}/failed`, { method: "POST", body: { reason: fail.dataset.fail } }));
+    }
+    const card = e.target.closest("[data-card]");
+    if (card) {
+      card.disabled = true;
+      return run(api(`/api/driver/stops/${card.dataset.card}/card`, { method: "POST", body: { cash: Number(cashOf()) } }).then((list) => (toast("Mijozga to'lov havolasi yuborildi"), list)));
+    }
     const map = e.target.closest("[data-map]");
     const routeMap = e.target.closest("[data-route-map]");
     if (map) return openExternal(`https://maps.google.com/?q=${map.dataset.map}`);
@@ -1421,12 +1470,12 @@ function routesSheet(body) {
       return run(api(`/api/driver/routes/${start.dataset.start}/start`, { method: "POST" }));
     }
     if (hand) {
-      const cash = Number(hand.dataset.cash);
+      const cash = Number(cashOf());
       const ask = cash ? `#${hand.dataset.no}: mebelni topshirib, ${sum(cash)} so'm naqd oldingizmi?` : `#${hand.dataset.no}: mebelni topshirdingizmi?`;
       if (!(await confirmDialog(ask))) return;
       haptic("medium");
       hand.disabled = true;
-      return run(api(`/api/driver/stops/${hand.dataset.hand}/handed`, { method: "POST" }));
+      return run(api(`/api/driver/stops/${hand.dataset.hand}/handed`, { method: "POST", body: { cash } }));
     }
   };
   draw();

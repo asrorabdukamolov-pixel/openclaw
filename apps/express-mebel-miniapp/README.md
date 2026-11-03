@@ -194,7 +194,14 @@ Haydovchi Telegram ilovada **☰ → 🚚 Reyslarim**:
 - **📍 Xarita** va **🗺 Butun marshrut** — Google Maps'da yo'l;
 - **▶️ Reysni boshlash** — mebel mashinaga yuklangach; hamma buyurtma omborda "Tayyor" bo'lishi kerak. Mijozlarga "yo'lga chiqdi" xabari boradi;
 - har manzilda **🤝 Topshirdim** — mijozga "Qabul qildim / Muammo bor" tugmalari qayta boradi. Mijoz 24 soat ichida javob bermasa, buyurtma avtomatik yopiladi.
-- Oxirgi manzil topshirilgach, reys "Tugadi" bo'ladi va buyurtmalar guruhiga haydovchidagi naqd summa yoziladi.
+- Haydovchi oldingi manzilni yopishi bilan bot navbatdagi mijozga "haydovchi kelyapti, uyda bo'ling" deb yozadi.
+- **Naqd:** "Topshirdim" da haydovchi olingan summani kiritadi. Qarzga berilmaydi: summa to'liq bo'lmasa, tizim topshirishga ruxsat bermaydi.
+  Kam bo'lsa — **💳 Qolganini karta bilan** (bot mijozga qolgan summaga to'lov havolasi yuboradi, to'lov o'tgach topshiriladi) yoki **❌ Topshirib bo'lmadi**.
+- **❌ Topshirib bo'lmadi** (uyda yo'q, telefonni ko'tarmadi, manzil topilmadi, pul yetmadi, qabul qilmadi): mebel omborga qaytadi, reysdan chiqadi,
+  mijozga yangi vaqt tanlash uchun kalendar boradi. Qayta yetkazish narxi va urinishlar soni: Sozlamalar → Yetkazish narxlari.
+  Urinishlar tugasa yoki mijoz qabul qilmasa — buyurtma "Topshirilmadi: qaror kerak" bo'ladi; admin buyurtmada **🚚 Qayta yetkazish** yoki **❌ Bekor qilish** ni tanlaydi.
+- Reysdagi buyurtma haydovchi topshirmaguncha o'zicha "yetkazildi" bo'lib yopilmaydi.
+- Oxirgi manzildan keyin reys "Tugadi" bo'ladi va buyurtmalar guruhiga hisobot boradi: topshirilganlar, topshirilmaganlar, haydovchidagi naqd va kutilgan summadan farq.
 
 Mahsulot og'irligi (kg) mahsulot formasida yoki Excel'dagi "Og'irligi, kg" ustunida kiritiladi; komplekt og'irligi modullardan hisoblanadi.
 
