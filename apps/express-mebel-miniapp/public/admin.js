@@ -2086,9 +2086,10 @@ views.settings = async (page) => {
             <label class="field">Kompaniya komissiyasi, yetkazishdan %<input class="input" name="commission" type="number" min="0" max="100" step="0.5" value="${cfg.commission}" /></label>
           </div>
           <div class="row2">
-            <label class="field">Uy ichigacha tushirish, savdodan %<input class="input" name="unloadingPercent" type="number" min="0" max="100" step="0.1" value="${cfg.unloadingPercent}" /></label>
+            <label class="field">Uy ichigacha tushirish, 1 kg (so'm)<input class="input" name="unloadingPerKg" type="number" min="0" step="50" value="${cfg.unloadingPerKg}" /></label>
             <label class="field">Tushirishning eng kam narxi (so'm)<input class="input" name="unloadingMin" type="number" min="0" step="1000" value="${cfg.unloadingMin}" /></label>
           </div>
+          <label class="field">Og'irligi kiritilmagan mahsulot bo'lsa: savdodan %<input class="input" name="unloadingPercent" type="number" min="0" max="100" step="0.1" value="${cfg.unloadingPercent}" /></label>
           <div class="row2">
             <label class="field">Liftsiz, har qavat (so'm)<input class="input" name="perFloor" type="number" min="0" value="${cfg.perFloor}" /></label>
             <label class="field">Bepul qavatlar<input class="input" name="freeFloors" type="number" min="0" max="30" value="${cfg.freeFloors}" /></label>
@@ -2194,7 +2195,7 @@ views.settings = async (page) => {
     // Yandex links put longitude first; in Uzbekistan latitude is the smaller number.
     const warehouse = m ? (a > b ? { lat: b, lon: a } : { lat: a, lon: b }) : null;
     try {
-      await api("/api/delivery/settings", { method: "PUT", body: { perKm: f.get("perKm"), commission: f.get("commission"), unloadingPercent: f.get("unloadingPercent"), unloadingMin: f.get("unloadingMin"), perFloor: f.get("perFloor"), freeFloors: f.get("freeFloors"), retryFee: f.get("retryFee"), maxAttempts: f.get("maxAttempts"), warehouse } });
+      await api("/api/delivery/settings", { method: "PUT", body: { perKm: f.get("perKm"), commission: f.get("commission"), unloadingPerKg: f.get("unloadingPerKg"), unloadingPercent: f.get("unloadingPercent"), unloadingMin: f.get("unloadingMin"), perFloor: f.get("perFloor"), freeFloors: f.get("freeFloors"), retryFee: f.get("retryFee"), maxAttempts: f.get("maxAttempts"), warehouse } });
       toast("Saqlandi");
       render();
     } catch (err) {

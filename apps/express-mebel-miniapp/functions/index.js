@@ -285,6 +285,9 @@ function parseLocation(value) {
 // keeps the delivery fee minus the company commission.
 const DELIVERY_DEFAULTS = {
   perKm: 1500,
+  // Unloading is priced by the load's weight; a cart with an item of unknown weight falls back to a
+  // percent of the goods.
+  unloadingPerKg: 500,
   unloadingPercent: 1.5,
   unloadingMin: 10000,
   perFloor: 20000,
@@ -338,6 +341,7 @@ function cleanDeliverySettings(input) {
   if (!(floors >= 0 && floors <= 30)) throw new HttpError(400, "Bepul qavatlar soni noto'g'ri");
   return {
     perKm: money(input.perKm, "1 km narxi"),
+    unloadingPerKg: money(input.unloadingPerKg ?? DELIVERY_DEFAULTS.unloadingPerKg, "Tushirish, 1 kg narxi"),
     unloadingPercent: percent(input.unloadingPercent ?? DELIVERY_DEFAULTS.unloadingPercent, "Tushirish foizi"),
     unloadingMin: money(input.unloadingMin ?? DELIVERY_DEFAULTS.unloadingMin, "Tushirishning eng kam narxi"),
     commission: percent(input.commission ?? DELIVERY_DEFAULTS.commission, "Yetkazish komissiyasi"),
@@ -359,7 +363,7 @@ function distanceKm(a, b) {
 
 const roundSum = (n) => Math.round(n / 1000) * 1000;
 
-function quoteDelivery(settings, input, goods) {
+function quoteDelivery(settings, input, goods, weight = null) {
   const location = parseLocation(input.location);
   if (!location) throw new HttpError(400, "Yetkazish narxini hisoblash uchun joylashuvni yuboring (📍 tugmasi)");
   const floor = Math.round(Number(input.floor));
@@ -369,11 +373,36 @@ function quoteDelivery(settings, input, goods) {
   const km = settings.warehouse ? Math.round(distanceKm(settings.warehouse, location) * 10) / 10 : null;
   const distance = km === null ? 0 : roundSum(km * settings.perKm);
   const stairs = lift ? 0 : Math.max(0, floor - settings.freeFloors) * settings.perFloor;
-  const unloading = Math.max(settings.unloadingMin, roundSum((goods * settings.unloadingPercent) / 100));
-  return { km, distance, unloading, floor, lift, stairs, total: distance + unloading + stairs };
+  const byWeight = weight !== null && settings.unloadingPerKg > 0;
+  const raw = byWeight ? weight * settings.unloadingPerKg : (goods * settings.unloadingPercent) / 100;
+  const unloading = Math.max(settings.unloadingMin, roundSum(raw));
+  return { km, distance, unloading, weight: byWeight ? weight : null, floor, lift, stairs, total: distance + unloading + stairs };
 }
 
 // ---------- stock ----------
+
+// Packed weight of a cart in kg, kits counted by their modules; null when any piece has no weight.
+async function cartWeight(items) {
+  if (!items.length) return null;
+  const snaps = await db.getAll(...items.map((i) => productsCol.doc(String(i.id || "-"))));
+  const parts = [];
+  for (const [k, x] of snaps.entries()) {
+    if (!x.exists) return null;
+    const qty = Math.max(0, Math.round(Number(items[k].qty)) || 0);
+    const p = x.data();
+    if (p.kind === "kit") for (const c of p.components) parts.push({ id: c.id, qty: c.qty * qty });
+    else parts.push({ weight: p.weight, qty });
+  }
+  const kitIds = [...new Set(parts.filter((x) => x.id).map((x) => x.id))];
+  const mods = kitIds.length ? new Map((await db.getAll(...kitIds.map((id) => productsCol.doc(id)))).map((x) => [x.id, x.data()?.weight])) : new Map();
+  let kg = 0;
+  for (const x of parts) {
+    const w = x.id ? mods.get(x.id) : x.weight;
+    if (!w) return null;
+    kg += w * x.qty;
+  }
+  return Math.round(kg * 10) / 10;
+}
 
 // Stock types: "in" (kirim), "out" (chiqim), "sale" (buyurtma), "release" (to'lanmagan bron qaytdi). Always called inside a Firestore
 // transaction that already read `product`, so concurrent orders cannot oversell the last unit.
@@ -1015,7 +1044,9 @@ async function handleOrder(req, res) {
       );
     }
     for (const m of pick) moveStock(t, m.ref, m.product, "sale", m.qty, m.kits.length ? `Buyurtma: ${m.kits.join(", ")}` : "Buyurtma", buyer);
-    const delivery = rates ? quoteDelivery(rates, body, lines.reduce((n, l) => n + l.product.price * l.qty, 0)) : null;
+    // Weight from the physical modules the warehouse will pick; unknown on any module means percent.
+    const weight = pick.every((m) => m.product.weight) ? Math.round(pick.reduce((n, m) => n + m.qty * m.product.weight, 0) * 10) / 10 : null;
+    const delivery = rates ? quoteDelivery(rates, body, lines.reduce((n, l) => n + l.product.price * l.qty, 0), weight) : null;
     const data = {
       number: (counters.order ?? FIRST_ORDER_NO) + 1,
       // What the buyer bought (kits stay one line) ...
@@ -3641,7 +3672,7 @@ async function route(req, res) {
     const items = (Array.isArray(body.items) ? body.items : []).slice(0, 100);
     const snaps = items.length ? await db.getAll(...items.map((i) => productsCol.doc(String(i.id || "-")))) : [];
     const goods = snaps.reduce((n, x, k) => n + (x.exists ? x.data().price * Math.max(0, Math.round(Number(items[k].qty)) || 0) : 0), 0);
-    return res.json(quoteDelivery(await deliverySettings(), body, goods));
+    return res.json(quoteDelivery(await deliverySettings(), body, goods, await cartWeight(items)));
   }
 
   if (path === "/api/crm/segments") {

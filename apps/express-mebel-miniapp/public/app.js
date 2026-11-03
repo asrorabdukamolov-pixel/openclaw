@@ -456,7 +456,7 @@ function quoteHtml(goods, q) {
   const dq = q.data;
   rows.push(
     `<div><span>Yetkazish${dq.km === null ? "" : ` · ${dq.km} km`}</span><span>${sum(dq.distance)} so'm</span></div>`,
-    `<div><span>Tushirib berish</span><span>${sum(dq.unloading)} so'm</span></div>`,
+    `<div><span>Uy ichigacha tushirish${dq.weight ? ` · ${dq.weight} kg` : ""}</span><span>${sum(dq.unloading)} so'm</span></div>`,
   );
   if (dq.stairs) rows.push(`<div><span>${dq.floor}-qavat, liftsiz</span><span>${sum(dq.stairs)} so'm</span></div>`);
   rows.push(`<div class="total"><span>Jami</span><span>${sum(goods + dq.total)} so'm</span></div>`);
@@ -1609,13 +1609,13 @@ function deliverySettingsSheet(body) {
       body.innerHTML = '<p class="empty">Yuklanmoqda…</p>';
       return;
     }
-    // Sample: a 5 000 000 so'm order, 12 km, 5th floor, no lift.
-    const sample = 12 * cfg.perKm + Math.max(cfg.unloadingMin, Math.round((5_000_000 * cfg.unloadingPercent) / 100 / 1000) * 1000) + Math.max(0, 5 - cfg.freeFloors) * cfg.perFloor;
+    // Sample: a 150 kg order, 12 km, 5th floor, no lift.
+    const sample = 12 * cfg.perKm + Math.max(cfg.unloadingMin, Math.round((150 * cfg.unloadingPerKg) / 1000) * 1000) + Math.max(0, 5 - cfg.freeFloors) * cfg.perFloor;
     body.innerHTML = `<h3>Yetkazish narxlari</h3>
       <form id="deliveryForm">
         <label class="field">1 km narxi (so'm)<input name="perKm" type="number" inputmode="numeric" min="0" value="${cfg.perKm}" /></label>
         <div class="row2">
-          <label class="field">Tushirish, savdodan %<input name="unloadingPercent" type="number" inputmode="decimal" min="0" max="100" step="0.1" value="${cfg.unloadingPercent}" /></label>
+          <label class="field">Tushirish, 1 kg (so'm)<input name="unloadingPerKg" type="number" inputmode="numeric" min="0" value="${cfg.unloadingPerKg}" /></label>
           <label class="field">Tushirish eng kami (so'm)<input name="unloadingMin" type="number" inputmode="numeric" min="0" value="${cfg.unloadingMin}" /></label>
         </div>
         <div class="row2">
@@ -1625,7 +1625,7 @@ function deliverySettingsSheet(body) {
         <label class="field">Ombor lokatsiyasi (masofa shu yerdan)<input name="warehouse" placeholder="41.311, 69.279 yoki xarita havolasi" value="${cfg.warehouse ? `${cfg.warehouse.lat}, ${cfg.warehouse.lon}` : ""}" /></label>
         <button type="button" class="auto-btn" data-here>📍 Hozir ombordaman: joylashuvimni olish</button>
         ${cfg.warehouse ? "" : '<p class="hint">⚠️ Ombor lokatsiyasi kiritilmagan: hozircha masofa narxi hisoblanmaydi.</p>'}
-        <p class="hint">Misol: 5 000 000 so'mlik buyurtma, 12 km, 5-qavat, liftsiz = ${sum(sample)} so'm. Masofa: to'g'ri chiziq × 1,3 (yo'l egriligi).</p>
+        <p class="hint">Misol: 150 kg yuk, 12 km, 5-qavat, liftsiz = ${sum(sample)} so'm. Og'irligi kiritilmagan mahsulot bo'lsa, tushirish savdodan ${cfg.unloadingPercent}%. Masofa: to'g'ri chiziq × 1,3.</p>
         <button class="btn" type="submit">Saqlash</button>
       </form>`;
   };
@@ -1654,7 +1654,7 @@ function deliverySettingsSheet(body) {
     try {
       cfg = await api("/api/delivery/settings", {
         method: "PUT",
-        body: { perKm: f.get("perKm"), unloadingPercent: f.get("unloadingPercent"), unloadingMin: f.get("unloadingMin"), perFloor: f.get("perFloor"), freeFloors: f.get("freeFloors"), warehouse },
+        body: { perKm: f.get("perKm"), unloadingPerKg: f.get("unloadingPerKg"), unloadingMin: f.get("unloadingMin"), perFloor: f.get("perFloor"), freeFloors: f.get("freeFloors"), warehouse },
       });
       toast("Saqlandi");
       draw();
