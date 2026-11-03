@@ -1853,10 +1853,158 @@ function driverDrawer(m) {
   });
 }
 
+// ---------- HR: payroll, attendance, payments ----------
+let hrMonth = null;
+const PAY_TYPES = { advance: "Avans", salary: "Oylik", bonus: "Bonus" };
+// An advance larger than what has accrued so far shows as overpaid, not as a negative debt.
+const balanceCell = (n) => (n < 0 ? `<b style="color:#c0392b">${sum(-n)}</b><br><span class="muted">ortiqcha berilgan</span>` : `<b>${sum(n)}</b>`);
+const hhmm = (ts) => (ts ? new Date(ts + 5 * 3600e3).toISOString().slice(11, 16) : "—");
+
+function employeeForm(e) {
+  openDrawer(e ? e.name : "Yangi xodim (oylikli)", (body) => {
+    body.innerHTML = `<form id="empForm" autocomplete="off">
+      <label class="field">Ism-familiya<input class="input" name="empName" required value="${esc(e?.name)}" /></label>
+      <div class="row2"><label class="field">Lavozim<input class="input" name="empPos" value="${esc(e?.position)}" placeholder="Omborchi, operator, buxgalter" /></label>
+      <label class="field">Telefon<input class="input" name="empPhone" value="${esc(e?.phone)}" /></label></div>
+      <label class="field">Oylik (qat'iy, so'm)<input class="input" name="empSalary" type="number" min="0" step="10000" required value="${e?.salary ?? ""}" /></label>
+      ${e ? `<label class="check"><input type="checkbox" name="empActive" ${e.active === false ? "" : "checked"}/> Ishlayapti</label>` : ""}
+      <button class="btn" type="submit" style="margin-top:10px">Saqlash</button></form>
+      <p class="muted" style="margin-top:10px">Saqlagach, xodim kartasidan «Telegram'ni ulash» havolasini oling: xodim uni bosib, botda «📍 Keldim / Ketdim» bilan keldi-ketdini belgilaydi.</p>`;
+    $("#empForm", body).onsubmit = async (ev) => {
+      ev.preventDefault();
+      const f = new FormData(ev.target);
+      try {
+        await api(e ? `/api/hr/employees/${e.id}` : "/api/hr/employees", { method: e ? "PUT" : "POST", body: { name: f.get("empName"), position: f.get("empPos"), phone: f.get("empPhone"), salary: f.get("empSalary"), active: e ? f.has("empActive") : true } });
+        toast("Saqlandi");
+        closeDrawer();
+        render();
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+  });
+}
+
+function payForm(row) {
+  return `<h3 style="margin:16px 0 8px">💸 To'lov berish (${hrMonth})</h3>
+    <div class="row2"><label class="field">Turi<select id="pType">${Object.entries(PAY_TYPES).map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}</select></label>
+    <label class="field">Summa<input class="input" id="pAmount" type="number" min="1" value="${Math.max(0, row.balance)}" /></label></div>
+    <div class="row2"><label class="field">Qayerdan<select id="pFrom"><option value="card">💳 Kartaga (bank)</option><option value="cash">💵 Kassadan naqd</option></select></label>
+    <label class="field">Izoh<input class="input" id="pNote" /></label></div>
+    <button class="btn" type="button" id="pGo">Berildi deb yozish</button>`;
+}
+
+async function personDrawer(row) {
+  if (row.kind === "master") {
+    location.hash = "#masters";
+    return;
+  }
+  openDrawer(row.name, async (body) => {
+    body.innerHTML = '<p class="empty">Yuklanmoqda…</p>';
+    const d = await api(`/api/hr/person?key=${encodeURIComponent(row.key)}&month=${hrMonth}`);
+    const head = `<div class="grid cols-2" style="gap:10px"><div class="card kpi"><small>Hisoblangan</small><b>${sum(row.accrued + row.bonus)}</b><span>${esc(row.work)}</span></div><div class="card kpi"><small>Berilishi kerak</small><b>${balanceCell(row.balance)}</b><span>berilgan ${sum(row.paid)}</span></div></div>`;
+    const payments = `<h3 style="margin:16px 0 8px">To'lovlar tarixi</h3><ul class="list">${d.payments.map((p) => `<li><span>${PAY_TYPES[p.type]} · ${p.month}<br><span class="muted">${when(p.at)} · ${p.from === "cash" ? "kassadan" : "kartaga"} · ${esc(p.by)}${p.note ? ` · ${esc(p.note)}` : ""}</span></span><b>${sum(p.amount)}</b></li>`).join("") || '<li class="muted">Hali to\'lov yo\'q</li>'}</ul>`;
+    if (d.kind === "emp") {
+      const e = d.employee;
+      body.innerHTML = `${head}
+        <dl class="specs" style="margin-top:12px"><dt>Lavozim</dt><dd>${esc(e.position || "—")}</dd><dt>Oylik</dt><dd>${sum(e.salary)} so'm · soatiga ${sum(row.detail.rate)}</dd><dt>Telegram</dt><dd>${e.telegramId ? `ulangan${e.username ? ` · @${esc(e.username)}` : ""}` : '<button class="btn btn--ghost" type="button" id="empLink">🔗 Ulash havolasini olish</button>'}</dd></dl>
+        <button class="btn btn--ghost" type="button" id="empEdit" style="margin-top:8px">✏️ Tahrirlash</button>
+        <h3 style="margin:16px 0 8px">Keldi-ketdi · ${hrMonth}</h3>
+        <div class="table-wrap"><table><thead><tr><th>Sana</th><th>Keldi</th><th>Ketdi</th><th class="num">Soat</th><th>Izoh</th></tr></thead><tbody>${
+          d.attendance.map((a) => `<tr><td>${a.date}</td><td>${hhmm(a.inAt)}${a.lateMin ? ` <span style="color:#c0392b">+${a.lateMin} daq</span>` : ""}</td><td>${a.outAt ? hhmm(a.outAt) : '<span class="muted">bosilmagan</span>'}</td><td class="num">${a.hours}</td><td>${a.corrected ? `✏️ ${esc(a.corrected.note)}` : ""}</td></tr>`).join("") || '<tr><td colspan="5" class="empty">Bu oy belgilanmagan</td></tr>'
+        }</tbody></table></div>
+        <details style="margin-top:10px"><summary>✏️ Kunni tuzatish (unutilgan ketdi, tizimdan tashqari kun)</summary>
+          <div class="row2"><label class="field">Sana<input class="input" type="date" id="aDate" value="${dayKey(Date.now())}"/></label><label class="field">Izoh (majburiy)<input class="input" id="aNote"/></label></div>
+          <div class="row2"><label class="field">Keldi<input class="input" type="time" id="aIn" value="${d.settings.start}"/></label><label class="field">Ketdi<input class="input" type="time" id="aOut" value="${d.settings.end}"/></label></div>
+          <button class="btn btn--ghost" type="button" id="aSave">Saqlash</button></details>
+        ${payForm(row)}${payments}`;
+      $("#empEdit", body).onclick = () => employeeForm(e);
+      if ($("#empLink", body)) {
+        $("#empLink", body).onclick = async () => {
+          const { link } = await api(`/api/hr/employees/${e.id}/invite`, { method: "POST" });
+          navigator.clipboard.writeText(link).catch(() => {});
+          $("#empLink", body).outerHTML = `<span style="word-break:break-all">${esc(link)}</span><br><span class="muted">Nusxalandi. Xodimga yuboring (24 soat amal qiladi).</span>`;
+        };
+      }
+      $("#aSave", body).onclick = async () => {
+        try {
+          await api("/api/hr/attendance", { method: "POST", body: { employeeId: e.id, date: $("#aDate", body).value, in: $("#aIn", body).value, out: $("#aOut", body).value, note: $("#aNote", body).value } });
+          toast("Saqlandi");
+          closeDrawer();
+          render();
+        } catch (err) {
+          toast(err.message);
+        }
+      };
+    } else {
+      body.innerHTML = `${head}
+        <h3 style="margin:16px 0 8px">Yetkazishlar · ${hrMonth}</h3>
+        <div class="table-wrap"><table><thead><tr><th>Sana</th><th>Buyurtma</th><th class="num">km</th><th class="num">Yetkazish puli</th><th class="num">Haydovchiga</th><th>Baho</th></tr></thead><tbody>${
+          d.deliveries.map((o) => `<tr><td>${when(o.at)}</td><td>#${o.number} ${esc(o.name)}</td><td class="num">${o.km ?? "—"}</td><td class="num">${sum(o.fee)}</td><td class="num"><b>${sum(o.pay)}</b></td><td>${o.rating ? "⭐".repeat(o.rating) : "—"}</td></tr>`).join("") || '<tr><td colspan="6" class="empty">Bu oy yetkazish yo\'q</td></tr>'
+        }</tbody></table></div>
+        <h3 style="margin:16px 0 8px">📸 Reklama hisobotlari</h3><ul class="list">${d.ads.map((r) => `<li><span>${r.month}</span>${pill(r.status === "approved" ? [`+${sum(r.amount)}`, "ok"] : r.status === "pending" ? ["Ko'rib chiqilmoqda", "warn"] : r.status === "rejected" ? ["Rad etilgan", "bad"] : ["Yuborilmagan", ""])}</li>`).join("") || '<li class="muted">Hali yo\'q</li>'}</ul>
+        ${payForm(row)}${payments}`;
+    }
+    $("#pGo", body).onclick = async () => {
+      try {
+        await api("/api/hr/pay", { method: "POST", body: { key: row.key, name: row.name, month: hrMonth, type: $("#pType", body).value, amount: $("#pAmount", body).value, from: $("#pFrom", body).value, note: $("#pNote", body).value } });
+        toast("To'lov yozildi");
+        closeDrawer();
+        render();
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+  });
+}
+
+function adDrawer(r) {
+  openDrawer(`Reklama hisoboti: ${r.driverName ?? ""}`, (body) => {
+    body.innerHTML = `<p>${r.month} · ${when(r.submittedAt)}</p>
+      <div class="doc-photos">${[["front", "Oldidan"], ["back", "Orqasidan"], ["left", "Chap"], ["right", "O'ng"]].map(([k, l]) => `<a href="${esc(r.photos[k])}" target="_blank" rel="noopener"><img src="${esc(r.photos[k])}" alt="${l}"/><small>${l}</small></a>`).join("")}</div>
+      <div class="stack" style="margin-top:14px"><button class="btn" type="button" id="adOk">✅ Tasdiqlash (bonus qo'shiladi)</button></div>
+      <div class="stack" style="margin-top:10px"><input class="input" id="adReason" placeholder="Rad etish sababi" style="flex:1"/><button class="btn btn--ghost" type="button" id="adNo">Rad etish</button></div>`;
+    const act = (path, payload) => async () => {
+      try {
+        await api(`/api/hr/ad-reports/${encodeURIComponent(r.id)}/${path}`, { method: "POST", body: payload() });
+        toast(path === "approve" ? "Tasdiqlandi" : "Rad etildi");
+        closeDrawer();
+        render();
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+    $("#adOk", body).onclick = act("approve", () => ({}));
+    $("#adNo", body).onclick = act("reject", () => ({ reason: $("#adReason", body).value }));
+  });
+}
+
 views.staff = async (page, tools) => {
-  tools.innerHTML = '<button class="btn" type="button" data-invite="warehouse">＋ Omborchini taklif qilish</button><button class="btn btn--dark" type="button" data-invite="driver">＋ Haydovchini taklif qilish</button>';
-  const [staff, screens, apps, masterApps] = await Promise.all([api("/api/staff"), api("/api/screens"), api("/api/driver-applications"), api("/api/master-applications")]);
+  hrMonth ??= dayKey(Date.now()).slice(0, 7);
+  const months = Array.from({ length: 4 }, (_, i) => { const d = new Date(Date.now() + 5 * 3600e3); d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth() - i); return d.toISOString().slice(0, 7); });
+  tools.innerHTML = `<select class="input" id="hrMonth" style="width:auto">${months.map((m) => `<option ${m === hrMonth ? "selected" : ""}>${m}</option>`).join("")}</select><button class="btn" type="button" id="newEmp">＋ Xodim (oylikli)</button><button class="btn btn--ghost" type="button" data-invite="warehouse">＋ Omborchi</button><button class="btn btn--ghost" type="button" data-invite="driver">＋ Haydovchi</button>`;
+  const [staff, screens, apps, masterApps, pay, ads] = await Promise.all([api("/api/staff"), api("/api/screens"), api("/api/driver-applications"), api("/api/master-applications"), api(`/api/hr/summary?month=${hrMonth}`), api("/api/hr/ad-reports")]);
+  const totals = pay.rows.reduce((t, r) => ({ accrued: t.accrued + r.accrued + r.bonus, paid: t.paid + r.paid, balance: t.balance + r.balance }), { accrued: 0, paid: 0, balance: 0 });
   page.innerHTML = `
+    <div class="grid cols-4">
+      <div class="card kpi"><small>Hisoblangan · ${hrMonth}</small><b>${sum(totals.accrued)} so'm</b><span>oylik, yetkazish, ishlar, bonus</span></div>
+      <div class="card kpi"><small>Berilgan</small><b>${sum(totals.paid)} so'm</b><span>avans va oylik</span></div>
+      <div class="card kpi"><small>Berilishi kerak</small><b>${sum(totals.balance)} so'm</b><span>bugungi holat</span></div>
+      <div class="card kpi"><small>Oy normasi</small><b>${pay.normHours} soat</b><span>${pay.settings.start}–${pay.settings.end}</span></div>
+    </div>
+    ${
+      ads.length
+        ? `<div class="card" style="margin-top:16px"><h3>📸 Reklama hisobotlari (${ads.length})</h3><ul class="list">${ads.map((r) => `<li data-ad="${esc(r.id)}" style="cursor:pointer"><span><b>${esc(r.driverName ?? r.driverId)}</b> · ${r.month}<br><span class="muted">${when(r.submittedAt)} · 4 ta rasm</span></span>${pill(["Ko'rib chiqish", "warn"])}</li>`).join("")}</ul></div>`
+        : ""
+    }
+    <div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Xodim</th><th>Lavozim</th><th>Ishlagan</th><th class="num">Hisoblangan</th><th class="num">Bonus</th><th class="num">Berilgan</th><th class="num">Berilishi kerak</th></tr></thead><tbody>${
+      pay.rows
+        .filter((r) => r.active || r.accrued || r.paid)
+        .map((r) => `<tr class="click" data-person="${esc(r.key)}"><td><b>${esc(r.name)}</b>${r.kind === "employee" && !r.linked ? '<br><span class="muted">⚠️ Telegram ulanmagan</span>' : ""}</td><td>${esc(r.position)}</td><td>${esc(r.work)}</td><td class="num">${sum(r.accrued)}</td><td class="num">${r.bonus ? sum(r.bonus) : "—"}</td><td class="num">${r.paid ? sum(r.paid) : "—"}</td><td class="num">${balanceCell(r.balance)}</td></tr>`)
+        .join("") || '<tr><td colspan="7" class="empty">Hali xodim yo\'q. «＋ Xodim (oylikli)» bilan qo\'shing.</td></tr>'
+    }</tbody></table></div>
+    <p class="muted" style="margin-top:8px">Oylik ishlagan soat bo'yicha: oylik ÷ oy normasi (${pay.normHours} soat) × ishlagan soat. Haydovchi: yetkazish pulidan komissiyadan keyingi qismi + tasdiqlangan reklama bonusi. Usta: to'langan ishlardagi ulushi.</p>
+    <div style="margin-top:16px"></div>
     ${
       apps.length
         ? `<div class="card" style="margin-bottom:16px"><h3>🆕 Haydovchi arizalari (${apps.length})</h3><ul class="list">${apps
@@ -1880,8 +2028,13 @@ views.staff = async (page, tools) => {
         screens.map((s) => `<li><span>🖥 ${esc(s.name)}<br><span class="muted">ulangan ${when(s.createdAt)}</span></span><button class="btn btn--ghost" data-unpair="${s.id}" data-name="${esc(s.name)}">Uzish</button></li>`).join("") || '<li class="muted">Ekran ulanmagan</li>'
       }</ul><p class="muted" style="margin-top:10px">Yangi ekran ulash: mini ilovada ☰ → 🖥 Ombor ekrani → Kod olish.</p></div>
     </div>
-    <div class="card" style="margin-top:16px"><h3>HR moduli: keyingi bosqich</h3><p class="muted">Lavozimlar (operator, usta, buxgalter), ishga qabul, davomat, maosh hisobi va ustalar platformasi (tekshiruv, reyting, daromad, bonus) TZ bo'yicha keyingi bosqichlarda shu bo'limga qo'shiladi.</p></div>`;
+`;
+  $("#hrMonth").onchange = (e) => {
+    hrMonth = e.target.value;
+    render();
+  };
   tools.onclick = async (e) => {
+    if (e.target.closest("#newEmp")) return employeeForm(null);
     const role = e.target.closest("[data-invite]")?.dataset.invite;
     if (!role) return;
     try {
@@ -1897,6 +2050,10 @@ views.staff = async (page, tools) => {
     }
   };
   page.onclick = async (e) => {
+    const person = e.target.closest("[data-person]");
+    if (person) return personDrawer(pay.rows.find((r) => r.key === person.dataset.person));
+    const adRow = e.target.closest("[data-ad]");
+    if (adRow) return adDrawer(ads.find((r) => r.id === adRow.dataset.ad));
     const app = e.target.closest("[data-app]");
     if (app) return applicationDrawer(apps.find((a) => a.id === app.dataset.app));
     const mapp = e.target.closest("[data-mapp]");
@@ -1918,7 +2075,7 @@ views.staff = async (page, tools) => {
 };
 
 views.settings = async (page) => {
-  const [cfg, seg, asm] = await Promise.all([api("/api/delivery/settings"), api("/api/crm/segments"), api("/api/assembly/settings")]);
+  const [cfg, seg, asm, hrs] = await Promise.all([api("/api/delivery/settings"), api("/api/crm/segments"), api("/api/assembly/settings"), api("/api/hr/settings")]);
   const info = state.info;
   page.innerHTML = `
     <div class="grid cols-2">
@@ -1926,7 +2083,11 @@ views.settings = async (page) => {
         <form autocomplete="off" id="dForm">
           <div class="row2">
             <label class="field">1 km narxi (so'm)<input class="input" name="perKm" type="number" min="0" value="${cfg.perKm}" /></label>
-            <label class="field">Tushirib berish (so'm)<input class="input" name="unloading" type="number" min="0" value="${cfg.unloading}" /></label>
+            <label class="field">Kompaniya komissiyasi, yetkazishdan %<input class="input" name="commission" type="number" min="0" max="100" step="0.5" value="${cfg.commission}" /></label>
+          </div>
+          <div class="row2">
+            <label class="field">Uy ichigacha tushirish, savdodan %<input class="input" name="unloadingPercent" type="number" min="0" max="100" step="0.1" value="${cfg.unloadingPercent}" /></label>
+            <label class="field">Tushirishning eng kam narxi (so'm)<input class="input" name="unloadingMin" type="number" min="0" step="1000" value="${cfg.unloadingMin}" /></label>
           </div>
           <div class="row2">
             <label class="field">Liftsiz, har qavat (so'm)<input class="input" name="perFloor" type="number" min="0" value="${cfg.perFloor}" /></label>
@@ -1954,6 +2115,16 @@ views.settings = async (page) => {
           <button class="btn" type="submit" style="margin-top:8px">Saqlash</button>
         </form>
       </div>
+      <div class="card"><h3>👥 HR: ish vaqti va keldi-ketdi</h3>
+        <form id="hForm" autocomplete="off">
+          <div class="field">Ish kunlari<div class="stack" style="margin-top:6px">${[[1, "Du"], [2, "Se"], [3, "Ch"], [4, "Pa"], [5, "Ju"], [6, "Sh"], [0, "Ya"]].map(([d, l]) => `<label class="check"><input type="checkbox" name="wd" value="${d}" ${hrs.workDays.includes(d) ? "checked" : ""}/> ${l}</label>`).join("")}</div></div>
+          <div class="row2"><label class="field">Ish boshlanishi<input class="input" name="start" type="time" value="${hrs.start}" /></label><label class="field">Ish tugashi<input class="input" name="end" type="time" value="${hrs.end}" /></label></div>
+          <div class="row2"><label class="field">Keldi-ketdi radiusi, m<input class="input" name="radius" type="number" min="30" max="5000" value="${hrs.radius}" /></label><label class="field">Reklama bonusi (haydovchi, oyiga)<input class="input" name="adBonus" type="number" min="0" step="10000" value="${hrs.adBonus}" /></label></div>
+          <label class="field">Ofis lokatsiyasi (ixtiyoriy; ombordan tashqari ish joyi)<input class="input" name="office" placeholder="41.311, 69.279" value="${hrs.office ? `${hrs.office.lat}, ${hrs.office.lon}` : ""}" /></label>
+          <p class="muted">Xodim botda «📍 Keldim / Ketdim» bosganda joylashuvi ombor yoki ofisdan shu radius ichida bo'lishi kerak. Oylik: oylik ÷ oy normasi × ishlagan soat.</p>
+          <button class="btn" type="submit" style="margin-top:8px">Saqlash</button>
+        </form>
+      </div>
       <div class="card"><h3>🔧 Yig'ish xizmati (ustalar)</h3>
         <form id="aForm" autocomplete="off">
           <div class="row2">
@@ -1977,6 +2148,20 @@ views.settings = async (page) => {
         <dt>Bo'limlar</dt><dd>${info.categories.map((c) => esc(c.name)).join(", ")}</dd>
       </dl><p class="muted">Bot tokeni, adminlar ro'yxati va to'lov tokeni xavfsizlik uchun faqat Cloud Shell orqali o'zgartiriladi.</p></div>
     </div>`;
+  $("#hForm").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const raw = String(f.get("office") || "").trim();
+    const m = /(-?\d{1,2}\.\d+)\s*[, ]\s*(-?\d{1,3}\.\d+)/.exec(raw);
+    if (raw && !m) return toast("Ofis lokatsiyasini 41.311, 69.279 ko'rinishida yozing");
+    try {
+      await api("/api/hr/settings", { method: "PUT", body: { workDays: f.getAll("wd").map(Number), start: f.get("start"), end: f.get("end"), radius: f.get("radius"), adBonus: f.get("adBonus"), office: m ? { lat: Number(m[1]), lon: Number(m[2]) } : null } });
+      toast("Saqlandi");
+      render();
+    } catch (err) {
+      toast(err.message);
+    }
+  };
   $("#aForm").onsubmit = async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
@@ -2009,7 +2194,7 @@ views.settings = async (page) => {
     // Yandex links put longitude first; in Uzbekistan latitude is the smaller number.
     const warehouse = m ? (a > b ? { lat: b, lon: a } : { lat: a, lon: b }) : null;
     try {
-      await api("/api/delivery/settings", { method: "PUT", body: { perKm: f.get("perKm"), unloading: f.get("unloading"), perFloor: f.get("perFloor"), freeFloors: f.get("freeFloors"), retryFee: f.get("retryFee"), maxAttempts: f.get("maxAttempts"), warehouse } });
+      await api("/api/delivery/settings", { method: "PUT", body: { perKm: f.get("perKm"), commission: f.get("commission"), unloadingPercent: f.get("unloadingPercent"), unloadingMin: f.get("unloadingMin"), perFloor: f.get("perFloor"), freeFloors: f.get("freeFloors"), retryFee: f.get("retryFee"), maxAttempts: f.get("maxAttempts"), warehouse } });
       toast("Saqlandi");
       render();
     } catch (err) {

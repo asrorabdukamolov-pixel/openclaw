@@ -18,6 +18,7 @@ import { onSchedule } from "firebase-functions/scheduler";
 import { logger } from "firebase-functions";
 import { defineSecret, defineString } from "firebase-functions/params";
 import { createMasters } from "./masters.js";
+import { createHr } from "./hr.js";
 
 const BOT_TOKEN = defineSecret("BOT_TOKEN");
 const PAYMENT_PROVIDER_TOKEN = defineSecret("PAYMENT_PROVIDER_TOKEN");
@@ -280,7 +281,19 @@ function parseLocation(value) {
 // Price = distance from the warehouse × per-km rate + unloading (every delivery needs a loader)
 // + carrying up the stairs above the first free floors when there is no lift. Admins edit the
 // rates in the mini app; these defaults apply until they do.
-const DELIVERY_DEFAULTS = { perKm: 1500, unloading: 100000, perFloor: 20000, freeFloors: 2, warehouse: null, retryFee: 0, maxAttempts: 2 };
+// Unloading into the home scales with the load: a percent of the goods with a floor. The driver
+// keeps the delivery fee minus the company commission.
+const DELIVERY_DEFAULTS = {
+  perKm: 1500,
+  unloadingPercent: 1.5,
+  unloadingMin: 50000,
+  perFloor: 20000,
+  freeFloors: 2,
+  commission: 20,
+  warehouse: null,
+  retryFee: 0,
+  maxAttempts: 2,
+};
 // Straight-line distance understates city roads; this factor approximates the driven route.
 const ROAD_FACTOR = 1.3;
 
@@ -316,11 +329,18 @@ function cleanDeliverySettings(input) {
     if (!(n >= 0 && n <= 10_000_000)) throw new HttpError(400, `${name} noto'g'ri`);
     return n;
   };
+  const percent = (v, name) => {
+    const n = Math.round(Number(v) * 10) / 10;
+    if (!(n >= 0 && n <= 100)) throw new HttpError(400, `${name}: 0–100 %`);
+    return n;
+  };
   const floors = Math.round(Number(input.freeFloors));
   if (!(floors >= 0 && floors <= 30)) throw new HttpError(400, "Bepul qavatlar soni noto'g'ri");
   return {
     perKm: money(input.perKm, "1 km narxi"),
-    unloading: money(input.unloading, "Tushirib berish narxi"),
+    unloadingPercent: percent(input.unloadingPercent ?? DELIVERY_DEFAULTS.unloadingPercent, "Tushirish foizi"),
+    unloadingMin: money(input.unloadingMin ?? DELIVERY_DEFAULTS.unloadingMin, "Tushirishning eng kam narxi"),
+    commission: percent(input.commission ?? DELIVERY_DEFAULTS.commission, "Yetkazish komissiyasi"),
     perFloor: money(input.perFloor, "Qavat narxi"),
     freeFloors: floors,
     warehouse: input.warehouse ? parseLocation(input.warehouse) : null,
@@ -339,7 +359,7 @@ function distanceKm(a, b) {
 
 const roundSum = (n) => Math.round(n / 1000) * 1000;
 
-function quoteDelivery(settings, input) {
+function quoteDelivery(settings, input, goods) {
   const location = parseLocation(input.location);
   if (!location) throw new HttpError(400, "Yetkazish narxini hisoblash uchun joylashuvni yuboring (📍 tugmasi)");
   const floor = Math.round(Number(input.floor));
@@ -349,7 +369,8 @@ function quoteDelivery(settings, input) {
   const km = settings.warehouse ? Math.round(distanceKm(settings.warehouse, location) * 10) / 10 : null;
   const distance = km === null ? 0 : roundSum(km * settings.perKm);
   const stairs = lift ? 0 : Math.max(0, floor - settings.freeFloors) * settings.perFloor;
-  return { km, distance, unloading: settings.unloading, floor, lift, stairs, total: distance + settings.unloading + stairs };
+  const unloading = Math.max(settings.unloadingMin, roundSum((goods * settings.unloadingPercent) / 100));
+  return { km, distance, unloading, floor, lift, stairs, total: distance + unloading + stairs };
 }
 
 // ---------- stock ----------
@@ -793,8 +814,13 @@ async function handleTelegramUpdate(req, res) {
   }
   const invite = /^\/start inv_([a-f0-9]{24})$/.exec(msg?.text || "");
   // Replies are best-effort: a failed send must not make Telegram retry an invite already used.
+  const employeeLink = /^\/start emp_([a-f0-9]{20})$/.exec(msg?.text || "");
   try {
-    if (invite && msg.chat.type === "private") {
+    if (employeeLink && msg.chat.type === "private") {
+      await hr.linkEmployee(msg, employeeLink[1]);
+    } else if (msg?.location && msg.chat.type === "private" && (await hr.handleLocation(msg))) {
+      // An employee's check-in or check-out.
+    } else if (invite && msg.chat.type === "private") {
       await tg("sendMessage", { chat_id: msg.chat.id, parse_mode: "HTML", ...(await joinStaff(msg.from, invite[1])) });
     } else if (msg?.text === "/panel" && msg.chat.type === "private" && isAdminId(msg.from.id)) {
       const { url } = await createAdminLogin(msg.from);
@@ -954,7 +980,9 @@ async function handleOrder(req, res) {
   if (!/^\+?[\d\s()-]{7,20}$/.test(phone)) throw new HttpError(400, "Telefon raqam noto'g'ri");
   const pickup = body.orderType === "pickup";
   const location = pickup ? null : parseLocation(body.location);
-  const delivery = pickup ? null : quoteDelivery(await deliverySettings(), body);
+  const rates = pickup ? null : await deliverySettings();
+  // Location and floor are checked before stock is touched; the price needs the goods total below.
+  if (rates) quoteDelivery(rates, body, 0);
   const payment = body.payment === "card" ? "card" : "cash";
   if (payment === "card" && !cardsEnabled()) throw new HttpError(400, "Karta orqali to'lov hali yoqilmagan");
   // The invoice opens inside Telegram and the receipt goes to the buyer's chat.
@@ -987,6 +1015,7 @@ async function handleOrder(req, res) {
       );
     }
     for (const m of pick) moveStock(t, m.ref, m.product, "sale", m.qty, m.kits.length ? `Buyurtma: ${m.kits.join(", ")}` : "Buyurtma", buyer);
+    const delivery = rates ? quoteDelivery(rates, body, lines.reduce((n, l) => n + l.product.price * l.qty, 0)) : null;
     const data = {
       number: (counters.order ?? FIRST_ORDER_NO) + 1,
       // What the buyer bought (kits stay one line) ...
@@ -1732,6 +1761,11 @@ async function handleCallback(q) {
   // The buttons go away once the buyer's order is closed, whoever's press closed it.
   let closeButtons = false;
   try {
+    if (action === "drr") {
+      answer = await rateDriver(q, id, Number(slotKey));
+      closeButtons = true;
+      return;
+    }
     if (action === "asr") {
       answer = await masters.rate(q);
       closeButtons = true;
@@ -1771,6 +1805,13 @@ async function handleCallback(q) {
       await setStage(id, ["shipped"], "delivered");
       answer = "Rahmat! Buyurtma yakunlandi";
       closeButtons = true;
+      if (o.handedById) {
+        await tg("sendMessage", {
+          chat_id: q.from.id,
+          text: "🚚 Haydovchining xizmatini baholang:",
+          reply_markup: { inline_keyboard: [[1, 2, 3, 4, 5].map((n) => ({ text: `${n} ⭐`, callback_data: `drr:${id}:${n}` }))] },
+        }).catch(() => {});
+      }
     } else if (action === "prob") {
       await setStage(id, ["shipped"], "problem");
       answer = "Muammoni tasvirlab bering";
@@ -2071,7 +2112,10 @@ async function handOver(orderId, user, body) {
   if (cash + card < due) {
     throw new HttpError(409, `To'liq emas: yana ${formatSum(due - cash - card)} kerak. «Qolganini karta bilan» yoki «Topshirib bo'lmadi» ni tanlang`);
   }
-  await ref.update({ handedAt: Date.now(), handedBy: staffName(user), handedById: String(user.id), cashCollected: cash, cashPending: cash > 0 });
+  // The driver's earning is fixed at hand-over so later rate changes do not rewrite past months.
+  const rates = await deliverySettings();
+  const driverPay = Math.round(((o.delivery?.total ?? 0) + (o.retryFees ?? 0)) * (1 - rates.commission / 100));
+  await ref.update({ handedAt: Date.now(), handedBy: staffName(user), handedById: String(user.id), cashCollected: cash, cashPending: cash > 0, driverPay });
   if (o.telegramUserId) {
     await tg("sendMessage", {
       chat_id: o.telegramUserId,
@@ -2255,7 +2299,24 @@ const REG_PROMPTS = {
   carLeft: "🚚 Mashinani CHAP yonidan rasmga oling (7/8):",
   carRight: "🚚 Mashinani O'NG yonidan rasmga oling (8/8):",
 };
-const DRIVER_MENU = { keyboard: [[{ text: "📋 Reyslarim" }]], resize_keyboard: true };
+const DRIVER_MENU = { keyboard: [[{ text: "📋 Reyslarim" }, { text: "📸 Reklama hisoboti" }]], resize_keyboard: true };
+
+// The buyer rates the driver who handed the order over; the average lives on the driver's staff doc.
+async function rateDriver(q, orderId, n) {
+  const rating = Math.min(5, Math.max(1, Math.round(n) || 0));
+  return db.runTransaction(async (t) => {
+    const ref = ordersCol.doc(orderId);
+    const o = (await t.get(ref)).data();
+    if (!o || o.telegramUserId !== q.from.id || !o.handedById || o.driverRating) return "Baho allaqachon qo'yilgan";
+    const dRef = staffCol.doc(o.handedById);
+    const d = (await t.get(dRef)).data() ?? {};
+    const sum = (d.ratingSum ?? 0) + rating;
+    const count = (d.ratingCount ?? 0) + 1;
+    t.update(ref, { driverRating: rating });
+    if (d.role === "driver") t.update(dRef, { ratingSum: sum, ratingCount: count, rating: Math.round((sum / count) * 10) / 10 });
+    return "Rahmat!";
+  });
+}
 const EMPLOYMENT = { staff: "Shtatda", contract: "Alohida (yollanma)" };
 
 const driverWebhookSecret = () => createHmac("sha256", DRIVER_BOT_TOKEN.value()).update("driver-webhook").digest("hex");
@@ -2426,6 +2487,8 @@ async function driverFromUpdate(from) {
 
 async function handleDriverText(msg, staff) {
   const user = msg.from;
+  if (msg.photo && (await hr.adPhoto(msg, staff, dtg))) return;
+  if (msg.text === "📸 Reklama hisoboti") return hr.adStart(msg.chat.id, user.id, dtg);
   const awaiting = staff.awaitingCash;
   if (awaiting && /^[\d\s']+$/.test(String(msg.text || "").trim())) {
     const cash = Number(String(msg.text).replace(/\D/g, ""));
@@ -3309,6 +3372,30 @@ const masters = createMasters({
   staffName,
 });
 
+const hr = createHr({
+  db,
+  HttpError,
+  tg,
+  logger,
+  parseLocation,
+  warehouse: async () => (await deliverySettings()).warehouse,
+  // Straight-line metres for the check-in fence (distanceKm adds the road factor for pricing).
+  distanceM: (a, b) => (distanceKm(a, b) / ROAD_FACTOR) * 1000,
+  saveBotPhoto,
+  driverToken: () => DRIVER_BOT_TOKEN.value(),
+  uuid: randomUUID,
+  adminIds: () => idList(ADMIN_IDS.value()),
+  staffCol,
+  ordersCol,
+  requireRole,
+  staffName,
+  botUsername: getBotUsername,
+  cashRef,
+  bookCash,
+  formatSum,
+  notifyDriver,
+});
+
 async function route(req, res) {
   const path = req.path;
   const method = req.method;
@@ -3316,6 +3403,10 @@ async function route(req, res) {
   if (path === "/api/telegram" && method === "POST") return handleTelegramUpdate(req, res);
   if (path === "/api/driverbot" && method === "POST") return handleDriverBot(req, res);
   if (path === "/api/masterbot" && method === "POST") return masters.handleMasterBot(req, res);
+  if (path.startsWith("/api/hr/")) {
+    const handled = await hr.handleApi(req, res, path, method);
+    if (handled !== null) return handled;
+  }
   if (path.startsWith("/api/assembly") || path.startsWith("/api/masters") || path.startsWith("/api/master-applications")) {
     const handled = await masters.handleApi(req, res, path, method);
     if (handled !== null) return handled;
@@ -3545,7 +3636,12 @@ async function route(req, res) {
   if (path === "/api/orders" && method === "POST") return handleOrder(req, res);
 
   if (path === "/api/delivery/quote" && method === "POST") {
-    return res.json(quoteDelivery(await deliverySettings(), req.body || {}));
+    const body = req.body || {};
+    // The unloading part depends on the cart: price it from the catalog, not from the client.
+    const items = (Array.isArray(body.items) ? body.items : []).slice(0, 100);
+    const snaps = items.length ? await db.getAll(...items.map((i) => productsCol.doc(String(i.id || "-")))) : [];
+    const goods = snaps.reduce((n, x, k) => n + (x.exists ? x.data().price * Math.max(0, Math.round(Number(items[k].qty)) || 0) : 0), 0);
+    return res.json(quoteDelivery(await deliverySettings(), body, goods));
   }
 
   if (path === "/api/crm/segments") {

@@ -445,7 +445,8 @@ const mapLink = (loc) => `https://maps.google.com/?q=${loc.lat},${loc.lon}`;
 // Delivery price comes from the server (the same formula it charges); the sheet asks again
 // whenever the pin, floor or lift changes.
 let quote = null; // { key, data } | { key, error }
-const quoteKey = (d) => JSON.stringify([d.location, d.floor, d.lift]);
+const quoteItems = () => cartLines().map((l) => ({ id: l.p.id, qty: l.qty }));
+const quoteKey = (d) => JSON.stringify([d.location, d.floor, d.lift, quoteItems()]);
 
 function quoteHtml(goods, q) {
   const rows = [`<div><span>Mahsulotlar</span><span>${sum(goods)} so'm</span></div>`];
@@ -469,7 +470,7 @@ async function refreshQuote(d, goods) {
     quote = null;
   } else {
     try {
-      quote = { key, data: await api("/api/delivery/quote", { method: "POST", body: { location: d.location, floor: Number(d.floor), lift: d.lift } }) };
+      quote = { key, data: await api("/api/delivery/quote", { method: "POST", body: { location: d.location, floor: Number(d.floor), lift: d.lift, items: quoteItems() } }) };
     } catch (err) {
       quote = { key, error: err.message };
     }
@@ -1608,11 +1609,15 @@ function deliverySettingsSheet(body) {
       body.innerHTML = '<p class="empty">Yuklanmoqda…</p>';
       return;
     }
-    const sample = 12 * cfg.perKm + cfg.unloading + Math.max(0, 5 - cfg.freeFloors) * cfg.perFloor;
+    // Sample: a 5 000 000 so'm order, 12 km, 5th floor, no lift.
+    const sample = 12 * cfg.perKm + Math.max(cfg.unloadingMin, Math.round((5_000_000 * cfg.unloadingPercent) / 100 / 1000) * 1000) + Math.max(0, 5 - cfg.freeFloors) * cfg.perFloor;
     body.innerHTML = `<h3>Yetkazish narxlari</h3>
       <form id="deliveryForm">
         <label class="field">1 km narxi (so'm)<input name="perKm" type="number" inputmode="numeric" min="0" value="${cfg.perKm}" /></label>
-        <label class="field">Tushirib berish, har buyurtma (so'm)<input name="unloading" type="number" inputmode="numeric" min="0" value="${cfg.unloading}" /></label>
+        <div class="row2">
+          <label class="field">Tushirish, savdodan %<input name="unloadingPercent" type="number" inputmode="decimal" min="0" max="100" step="0.1" value="${cfg.unloadingPercent}" /></label>
+          <label class="field">Tushirish eng kami (so'm)<input name="unloadingMin" type="number" inputmode="numeric" min="0" value="${cfg.unloadingMin}" /></label>
+        </div>
         <div class="row2">
           <label class="field">Liftsiz, har qavat (so'm)<input name="perFloor" type="number" inputmode="numeric" min="0" value="${cfg.perFloor}" /></label>
           <label class="field">Bepul qavatlar<input name="freeFloors" type="number" inputmode="numeric" min="0" max="30" value="${cfg.freeFloors}" /></label>
@@ -1620,7 +1625,7 @@ function deliverySettingsSheet(body) {
         <label class="field">Ombor lokatsiyasi (masofa shu yerdan)<input name="warehouse" placeholder="41.311, 69.279 yoki xarita havolasi" value="${cfg.warehouse ? `${cfg.warehouse.lat}, ${cfg.warehouse.lon}` : ""}" /></label>
         <button type="button" class="auto-btn" data-here>📍 Hozir ombordaman: joylashuvimni olish</button>
         ${cfg.warehouse ? "" : '<p class="hint">⚠️ Ombor lokatsiyasi kiritilmagan: hozircha masofa narxi hisoblanmaydi.</p>'}
-        <p class="hint">Misol: 12 km, 5-qavat, liftsiz = ${sum(sample)} so'm. Masofa: to'g'ri chiziq × 1,3 (yo'l egriligi).</p>
+        <p class="hint">Misol: 5 000 000 so'mlik buyurtma, 12 km, 5-qavat, liftsiz = ${sum(sample)} so'm. Masofa: to'g'ri chiziq × 1,3 (yo'l egriligi).</p>
         <button class="btn" type="submit">Saqlash</button>
       </form>`;
   };
@@ -1649,7 +1654,7 @@ function deliverySettingsSheet(body) {
     try {
       cfg = await api("/api/delivery/settings", {
         method: "PUT",
-        body: { perKm: f.get("perKm"), unloading: f.get("unloading"), perFloor: f.get("perFloor"), freeFloors: f.get("freeFloors"), warehouse },
+        body: { perKm: f.get("perKm"), unloadingPercent: f.get("unloadingPercent"), unloadingMin: f.get("unloadingMin"), perFloor: f.get("perFloor"), freeFloors: f.get("freeFloors"), warehouse },
       });
       toast("Saqlandi");
       draw();

@@ -146,6 +146,12 @@ Bu versiyani yuklagandan keyin `/api/setup` ni **qayta oching**: mavjud mahsulot
 
 ## Yetkazish narxi
 
+Sozlamalar → Yetkazish narxlari: **1 km narxi**, **uy ichigacha tushirish** = savdo summasining % (hozir 1,5%, eng kami 50 000),
+**liftsiz har qavat** (1–2-qavat bepul) va **kompaniya komissiyasi** (yetkazish pulidan, hozir 20%). Haydovchi har topshirilgan
+manzil uchun yetkazish pulining komissiyadan qolgan qismini oladi (topshirish paytida buyurtmaga yoziladi).
+
+
+
 Rasmiylashtirishda mijoz joylashuv, qavat va "Lift bor" ni kiritadi; narx serverda hisoblanib, to'lashdan oldin ko'rinadi
 va jami summaga (karta to'lovida alohida "Yetkazib berish" qatori bo'lib) qo'shiladi:
 
@@ -218,6 +224,19 @@ Haydovchi Telegram ilovada **☰ → 🚚 Reyslarim**:
 - Oxirgi manzildan keyin reys "Tugadi" bo'ladi va buyurtmalar guruhiga hisobot boradi: topshirilganlar, topshirilmaganlar, haydovchidagi naqd va kutilgan summadan farq.
 
 Mahsulot og'irligi (kg) mahsulot formasida yoki Excel'dagi "Og'irligi, kg" ustunida kiritiladi; komplekt og'irligi modullardan hisoblanadi.
+
+## HR: oylik, keldi-ketdi, to'lovlar
+
+Panel → **Xodimlar (HR)** (yuqorida oy tanlanadi; hisob har oyning 1-sanasidan, bugungi holat real vaqtda):
+- **Jadval:** har bir xodim, haydovchi va usta — ishlagani, hisoblangan, bonus, berilgan va **berilishi kerak**.
+- **Oylikli xodim:** «＋ Xodim (oylikli)» (lavozim, qat'iy oylik) → xodim kartasida **Telegram'ni ulash havolasi** → xodim bosib ulanadi.
+  Keyin mijozlar botidagi **📍 Keldim / Ketdim** tugmasi bilan belgilaydi: joylashuvi ombor (yoki ofis) dan radius ichida bo'lishi shart.
+  Oylik **ishlagan soat** bo'yicha: oylik ÷ oy normasi × ishlagan soat. Kechikishlar ko'rinadi (jarima yo'q). Unutilgan kunni HR izoh bilan tuzatadi.
+- **Haydovchi:** topshirgan manzillari bo'yicha daromad + **reklama bonusi**: haydovchi botida «📸 Reklama hisoboti» → mashinaning 4 tomoni →
+  HR tasdiqlasa, bonus (hozir 700 000) shu oyga qo'shiladi. Mijoz «Qabul qildim» dan keyin haydovchini 1–5 ⭐ baholaydi.
+- **Usta:** to'langan ishlardagi ulushi (to'lov «Ustalar» bo'limida).
+- **To'lov berish:** avans / oylik / bonus, kartaga yoki kassadan (kassada «Maosh» chiqimi). Tarix xodim kartasida.
+- Sozlamalar → **HR:** ish kunlari, ish vaqti, radius, ofis lokatsiyasi, reklama bonusi.
 
 ## Ustalar (mebel yig'ish)
 
