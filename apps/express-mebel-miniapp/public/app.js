@@ -721,7 +721,7 @@ function productForm(id, newKind = "item") {
     const title = p ? (kit ? "Komplektni tahrirlash" : "Mahsulotni tahrirlash") : kit ? "Yangi komplekt" : "Yangi mahsulot / modul";
     const itemFields = `
         <label class="field">Qutilar soni (1 dona nechta qutida keladi)<input name="boxes" type="number" inputmode="numeric" min="1" max="20" required value="${p?.boxes ?? 1}" /></label>
-        <label class="field">Og'irligi, kg (qadoq bilan, ixtiyoriy)<input name="weight" type="number" inputmode="decimal" min="0" step="0.1" value="${p?.weight ?? ""}" /></label>
+        <label class="field">Og'irligi, kg (qadog'i bilan, majburiy)<input name="weight" type="number" inputmode="decimal" min="0" step="0.1" required value="${p?.weight ?? ""}" /></label>
         <label class="check"><input type="checkbox" name="standalone" ${p?.standalone === false ? "" : "checked"} /> Katalogda alohida sotiladi (komplekt moduli bo'lsa, belgini olib tashlang)</label>`;
     const kitFields = `
         <div class="field">Komplekt tarkibi (modullar)</div>
@@ -1610,14 +1610,11 @@ function deliverySettingsSheet(body) {
       return;
     }
     // Sample: a 150 kg order, 12 km, 5th floor, no lift.
-    const sample = 12 * cfg.perKm + Math.max(cfg.unloadingMin, Math.round((150 * cfg.unloadingPerKg) / 1000) * 1000) + Math.max(0, 5 - cfg.freeFloors) * cfg.perFloor;
+    const sample = 12 * cfg.perKm + Math.round((150 * cfg.unloadingPerKg) / 1000) * 1000 + Math.max(0, 5 - cfg.freeFloors) * cfg.perFloor;
     body.innerHTML = `<h3>Yetkazish narxlari</h3>
       <form id="deliveryForm">
         <label class="field">1 km narxi (so'm)<input name="perKm" type="number" inputmode="numeric" min="0" value="${cfg.perKm}" /></label>
-        <div class="row2">
-          <label class="field">Tushirish, 1 kg (so'm)<input name="unloadingPerKg" type="number" inputmode="numeric" min="0" value="${cfg.unloadingPerKg}" /></label>
-          <label class="field">Tushirish eng kami (so'm)<input name="unloadingMin" type="number" inputmode="numeric" min="0" value="${cfg.unloadingMin}" /></label>
-        </div>
+        <label class="field">Uy ichigacha tushirish, 1 kg uchun (so'm)<input name="unloadingPerKg" type="number" inputmode="numeric" min="0" value="${cfg.unloadingPerKg}" /></label>
         <div class="row2">
           <label class="field">Liftsiz, har qavat (so'm)<input name="perFloor" type="number" inputmode="numeric" min="0" value="${cfg.perFloor}" /></label>
           <label class="field">Bepul qavatlar<input name="freeFloors" type="number" inputmode="numeric" min="0" max="30" value="${cfg.freeFloors}" /></label>
@@ -1625,7 +1622,7 @@ function deliverySettingsSheet(body) {
         <label class="field">Ombor lokatsiyasi (masofa shu yerdan)<input name="warehouse" placeholder="41.311, 69.279 yoki xarita havolasi" value="${cfg.warehouse ? `${cfg.warehouse.lat}, ${cfg.warehouse.lon}` : ""}" /></label>
         <button type="button" class="auto-btn" data-here>📍 Hozir ombordaman: joylashuvimni olish</button>
         ${cfg.warehouse ? "" : '<p class="hint">⚠️ Ombor lokatsiyasi kiritilmagan: hozircha masofa narxi hisoblanmaydi.</p>'}
-        <p class="hint">Misol: 150 kg yuk, 12 km, 5-qavat, liftsiz = ${sum(sample)} so'm. Og'irligi kiritilmagan mahsulot bo'lsa, tushirish savdodan ${cfg.unloadingPercent}%. Masofa: to'g'ri chiziq × 1,3.</p>
+        <p class="hint">Misol: 150 kg yuk, 12 km, 5-qavat, liftsiz = ${sum(sample)} so'm. Masofa: to'g'ri chiziq × 1,3 (yo'l egriligi).</p>
         <button class="btn" type="submit">Saqlash</button>
       </form>`;
   };
@@ -1654,7 +1651,7 @@ function deliverySettingsSheet(body) {
     try {
       cfg = await api("/api/delivery/settings", {
         method: "PUT",
-        body: { perKm: f.get("perKm"), unloadingPerKg: f.get("unloadingPerKg"), unloadingMin: f.get("unloadingMin"), perFloor: f.get("perFloor"), freeFloors: f.get("freeFloors"), warehouse },
+        body: { perKm: f.get("perKm"), unloadingPerKg: f.get("unloadingPerKg"), perFloor: f.get("perFloor"), freeFloors: f.get("freeFloors"), warehouse },
       });
       toast("Saqlandi");
       draw();

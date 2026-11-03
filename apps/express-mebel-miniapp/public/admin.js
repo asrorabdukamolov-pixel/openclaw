@@ -383,7 +383,7 @@ const XLS_COLUMNS = [
   ["supplierId", "Ta'minotchi", "Fabrika / ta'minotchi nomi, Zakup → Ta'minotchilar'dagidek. Komplektda yozilmaydi."],
   ["minStock", "Minimal qoldiq", "Qoldiq shundan kam bo'lsa, Zakup «Buyurtma berish kerak» ro'yxatiga chiqadi."],
   ["cost", "Tannarx", "Bitta mahsulotning kirim narxi, so'm (faqat adminlar ko'radi). Foyda hisobi shundan. Komplektda yozilmaydi: modullardan hisoblanadi."],
-  ["weight", "Og'irligi, kg", "Bitta mahsulot qadog'i bilan, kg. Logistika mashina sig'imini shu bo'yicha hisoblaydi. Komplektda yozilmaydi."],
+  ["weight", "Og'irligi, kg", "MAJBURIY (komplektdan tashqari). Bitta mahsulot qadog'i bilan, kg: uy ichigacha tushirish narxi va mashina sig'imi shundan hisoblanadi. Komplekt og'irligi modullardan."],
   ["size", "O'lcham", "Masalan: 120×60×75 sm"],
   ["material", "Material", "Masalan: LDSP 16 mm"],
   ["description", "Tavsif", "Mijoz ko'radigan matn."],
@@ -604,7 +604,7 @@ function productForm(id, newKind = "item") {
           : `<div class="row2"><label class="field">Qutilar soni<input class="input" name="boxes" type="number" min="1" max="20" value="${p?.boxes ?? 1}" /></label>
              ${p ? `<div class="field">Omborda<b style="color:var(--ink);font-size:16px">${p.stock} ta</b></div>` : `<label class="field">Boshlang'ich qoldiq<input class="input" name="stock" type="number" min="0" value="0" /></label>`}</div>
              <label class="field">Tannarx, so'm (faqat adminlar ko'radi)<input class="input" name="cost" type="number" min="0" value="${p?.cost ?? ""}" placeholder="foyda hisobi uchun" /></label>
-             <label class="field">Og'irligi, kg (qadoq bilan, ixtiyoriy)<input class="input" name="weight" type="number" min="0" step="0.1" value="${p?.weight ?? ""}" placeholder="logistika uchun" /></label>
+             <label class="field">Og'irligi, kg (qadog'i bilan, majburiy)<input class="input" name="weight" type="number" min="0" step="0.1" value="${p?.weight ?? ""}" placeholder="tushirish narxi va logistika uchun" /></label>
              <div class="row2"><label class="field">Ta'minotchi<select name="supplierId"><option value="">— tanlanmagan —</option>${(state.suppliers ?? []).map((x) => `<option value="${x.id}" ${p?.supplierId === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>
              <label class="field">Minimal qoldiq (shundan kam bo'lsa — zakup)<input class="input" name="minStock" type="number" min="0" value="${p?.minStock ?? ""}" /></label></div>
              <label class="check"><input type="checkbox" name="standalone" ${p?.standalone === false ? "" : "checked"} /> Katalogda alohida sotiladi</label>`
@@ -2085,11 +2085,7 @@ views.settings = async (page) => {
             <label class="field">1 km narxi (so'm)<input class="input" name="perKm" type="number" min="0" value="${cfg.perKm}" /></label>
             <label class="field">Kompaniya komissiyasi, yetkazishdan %<input class="input" name="commission" type="number" min="0" max="100" step="0.5" value="${cfg.commission}" /></label>
           </div>
-          <div class="row2">
-            <label class="field">Uy ichigacha tushirish, 1 kg (so'm)<input class="input" name="unloadingPerKg" type="number" min="0" step="50" value="${cfg.unloadingPerKg}" /></label>
-            <label class="field">Tushirishning eng kam narxi (so'm)<input class="input" name="unloadingMin" type="number" min="0" step="1000" value="${cfg.unloadingMin}" /></label>
-          </div>
-          <label class="field">Og'irligi kiritilmagan mahsulot bo'lsa: savdodan %<input class="input" name="unloadingPercent" type="number" min="0" max="100" step="0.1" value="${cfg.unloadingPercent}" /></label>
+          <label class="field">Uy ichigacha tushirish, 1 kg uchun (so'm)<input class="input" name="unloadingPerKg" type="number" min="0" step="50" value="${cfg.unloadingPerKg}" /></label>
           <div class="row2">
             <label class="field">Liftsiz, har qavat (so'm)<input class="input" name="perFloor" type="number" min="0" value="${cfg.perFloor}" /></label>
             <label class="field">Bepul qavatlar<input class="input" name="freeFloors" type="number" min="0" max="30" value="${cfg.freeFloors}" /></label>
@@ -2195,7 +2191,7 @@ views.settings = async (page) => {
     // Yandex links put longitude first; in Uzbekistan latitude is the smaller number.
     const warehouse = m ? (a > b ? { lat: b, lon: a } : { lat: a, lon: b }) : null;
     try {
-      await api("/api/delivery/settings", { method: "PUT", body: { perKm: f.get("perKm"), commission: f.get("commission"), unloadingPerKg: f.get("unloadingPerKg"), unloadingPercent: f.get("unloadingPercent"), unloadingMin: f.get("unloadingMin"), perFloor: f.get("perFloor"), freeFloors: f.get("freeFloors"), retryFee: f.get("retryFee"), maxAttempts: f.get("maxAttempts"), warehouse } });
+      await api("/api/delivery/settings", { method: "PUT", body: { perKm: f.get("perKm"), commission: f.get("commission"), unloadingPerKg: f.get("unloadingPerKg"), perFloor: f.get("perFloor"), freeFloors: f.get("freeFloors"), retryFee: f.get("retryFee"), maxAttempts: f.get("maxAttempts"), warehouse } });
       toast("Saqlandi");
       render();
     } catch (err) {
