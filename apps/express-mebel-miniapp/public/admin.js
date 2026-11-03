@@ -380,6 +380,8 @@ const XLS_COLUMNS = [
   ["oldPrice", "Eski narx", "Chegirma uchun: narxdan katta bo'lsin. Bo'sh = chegirma yo'q."],
   ["stock", "Qoldiq", "Ombordagi soni. O'zgarsa, ombor jurnaliga «Excel import» bo'lib yoziladi. Komplektda yozilmaydi."],
   ["boxes", "Qutilar soni", "Bitta mahsulot nechta qutida (har qutiga alohida yorliq)."],
+  ["supplierId", "Ta'minotchi", "Fabrika / ta'minotchi nomi, Zakup → Ta'minotchilar'dagidek. Komplektda yozilmaydi."],
+  ["minStock", "Minimal qoldiq", "Qoldiq shundan kam bo'lsa, Zakup «Buyurtma berish kerak» ro'yxatiga chiqadi."],
   ["cost", "Tannarx", "Bitta mahsulotning kirim narxi, so'm (faqat adminlar ko'radi). Foyda hisobi shundan. Komplektda yozilmaydi: modullardan hisoblanadi."],
   ["weight", "Og'irligi, kg", "Bitta mahsulot qadog'i bilan, kg. Logistika mashina sig'imini shu bo'yicha hisoblaydi. Komplektda yozilmaydi."],
   ["size", "O'lcham", "Masalan: 120×60×75 sm"],
@@ -407,12 +409,12 @@ const yesNo = (v) => (v ? "ha" : "yo'q");
 
 async function exportCatalog() {
   const XLSX = await loadXlsx();
-  await refreshProducts();
+  [, state.suppliers] = await Promise.all([refreshProducts(), api("/api/suppliers")]);
   const rows = state.products.map((p) => {
     const kit = isKit(p);
     const cells = {
       id: p.id, sku: kit ? "" : p.sku ?? "", kind: kit ? "Komplekt" : "Mahsulot", name: p.name, category: catName(p.category),
-      price: p.price, oldPrice: p.oldPrice ?? "", stock: kit ? "" : p.stock, boxes: kit ? "" : p.boxes ?? 1, cost: kit ? "" : p.cost ?? "", weight: kit ? "" : p.weight ?? "",
+      price: p.price, oldPrice: p.oldPrice ?? "", stock: kit ? "" : p.stock, boxes: kit ? "" : p.boxes ?? 1, cost: kit ? "" : p.cost ?? "", supplierId: kit ? "" : (state.suppliers ?? []).find((x) => x.id === p.supplierId)?.name ?? "", minStock: kit ? "" : p.minStock ?? "", weight: kit ? "" : p.weight ?? "",
       size: p.size ?? "", material: p.material ?? "", description: p.description ?? "",
       standalone: kit ? "" : yesNo(p.standalone !== false), isNew: yesNo(p.isNew), draft: yesNo(p.draft),
       components: kit ? p.parts.map((c) => `${c.sku ?? c.name}×${c.qty}`).join("; ") : "",
@@ -603,6 +605,8 @@ function productForm(id, newKind = "item") {
              ${p ? `<div class="field">Omborda<b style="color:var(--ink);font-size:16px">${p.stock} ta</b></div>` : `<label class="field">Boshlang'ich qoldiq<input class="input" name="stock" type="number" min="0" value="0" /></label>`}</div>
              <label class="field">Tannarx, so'm (faqat adminlar ko'radi)<input class="input" name="cost" type="number" min="0" value="${p?.cost ?? ""}" placeholder="foyda hisobi uchun" /></label>
              <label class="field">Og'irligi, kg (qadoq bilan, ixtiyoriy)<input class="input" name="weight" type="number" min="0" step="0.1" value="${p?.weight ?? ""}" placeholder="logistika uchun" /></label>
+             <div class="row2"><label class="field">Ta'minotchi<select name="supplierId"><option value="">— tanlanmagan —</option>${(state.suppliers ?? []).map((x) => `<option value="${x.id}" ${p?.supplierId === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>
+             <label class="field">Minimal qoldiq (shundan kam bo'lsa — zakup)<input class="input" name="minStock" type="number" min="0" value="${p?.minStock ?? ""}" /></label></div>
              <label class="check"><input type="checkbox" name="standalone" ${p?.standalone === false ? "" : "checked"} /> Katalogda alohida sotiladi</label>`
       }
       <label class="field">Tavsif<textarea name="description" rows="4">${esc(p?.description)}</textarea></label>
@@ -692,7 +696,7 @@ function productForm(id, newKind = "item") {
       };
       const payload = kit
         ? { ...common, kind: "kit", components: parts, whenShort: f.get("whenShort"), leadDays: Number(f.get("leadDays")) }
-        : { ...common, kind: "item", boxes: Number(f.get("boxes")), weight: f.get("weight") || null, cost: f.get("cost") === "" ? null : f.get("cost"), standalone: f.has("standalone"), stock: Number(f.get("stock") || 0) };
+        : { ...common, kind: "item", boxes: Number(f.get("boxes")), weight: f.get("weight") || null, cost: f.get("cost") === "" ? null : f.get("cost"), supplierId: f.get("supplierId") || null, minStock: f.get("minStock") === "" ? null : f.get("minStock"), standalone: f.has("standalone"), stock: Number(f.get("stock") || 0) };
       try {
         await api(p ? `/api/products/${p.id}` : "/api/products", { method: p ? "PUT" : "POST", body: payload });
         await refreshProducts();
@@ -791,6 +795,192 @@ function stockForm(id) {
         await refreshProducts();
         toast("Saqlandi");
         stockForm(id);
+        render();
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+  });
+}
+
+// ---------- purchasing: what to reorder, purchase orders, suppliers ----------
+const PO_STATE = { draft: ["Qoralama", ""], sent: ["Yuborilgan", "teal"], partial: ["Qisman keldi", "warn"], received: ["Qabul qilindi", "ok"], cancelled: ["Bekor", ""] };
+const REORDER_DAYS = 30;
+let purchaseTab = "need";
+
+// Reorder: cover the supplier's lead time plus a month of sales, never below twice the minimum.
+function reorderPlan(orders, purchases) {
+  const sold = new Map();
+  for (const o of orders.filter(isSale)) for (const u of o.units ?? []) sold.set(u.id, (sold.get(u.id) || 0) + u.qty);
+  const onOrder = new Map();
+  for (const po of purchases.filter((x) => ["draft", "sent", "partial"].includes(x.status))) for (const l of po.lines) onOrder.set(l.productId, (onOrder.get(l.productId) || 0) + l.qty - l.received);
+  return goods()
+    .map((p) => {
+      const daily = (sold.get(p.id) || 0) / REORDER_DAYS;
+      const lead = (state.suppliers ?? []).find((x) => x.id === p.supplierId)?.leadDays ?? 7;
+      const coming = onOrder.get(p.id) || 0;
+      const trigger = Math.max(p.minStock ?? 0, Math.ceil(daily * lead));
+      const target = Math.max((p.minStock ?? 0) * 2, Math.ceil(daily * (lead + 30)));
+      const suggest = Math.max(0, target - p.stock - coming);
+      const daysLeft = daily ? Math.floor(p.stock / daily) : null;
+      return { p, daily, lead, coming, suggest, daysLeft, need: p.stock + coming <= trigger && suggest > 0 };
+    })
+    .filter((r) => r.need)
+    .sort((a, b) => (a.daysLeft ?? 999) - (b.daysLeft ?? 999));
+}
+
+views.purchases = async (page, tools) => {
+  const [purchases, orders, suppliers] = await Promise.all([api("/api/purchases"), ordersFor(REORDER_DAYS), api("/api/suppliers")]);
+  state.suppliers = suppliers;
+  const plan = reorderPlan(orders, purchases);
+  const open = purchases.filter((x) => ["sent", "partial"].includes(x.status));
+  const debt = purchases.filter((x) => x.status !== "cancelled").reduce((n, x) => n + x.debt, 0);
+  tools.innerHTML = `<div class="seg">${[["need", `Buyurtma berish kerak (${plan.length})`], ["orders", "Zakup buyurtmalari"], ["suppliers", "Ta'minotchilar"]].map(([k, l]) => `<button type="button" data-pt="${k}" class="${k === purchaseTab ? "on" : ""}">${l}</button>`).join("")}</div>`;
+  tools.onclick = (e) => {
+    const b = e.target.closest("[data-pt]");
+    if (!b) return;
+    purchaseTab = b.dataset.pt;
+    render();
+  };
+  const kpis = `<div class="grid cols-4">
+      <div class="card kpi"><small>Buyurtma berish kerak</small><b>${plan.length}</b><span>mahsulot / modul</span></div>
+      <div class="card kpi"><small>Yo'ldagi zakup</small><b>${open.length}</b><span>${open.filter((x) => x.expectedAt < Date.now()).length} tasi kechikmoqda</span></div>
+      <div class="card kpi"><small>Ta'minotchilarga qarz</small><b>${sum(debt)} so'm</b><span>&nbsp;</span></div>
+      <div class="card kpi"><small>Ta'minotchilar</small><b>${suppliers.length}</b><span>&nbsp;</span></div>
+    </div>`;
+  if (purchaseTab === "suppliers") {
+    page.innerHTML = `${kpis}<div class="card" style="margin-top:16px"><h3>🏭 Ta'minotchilar</h3><ul class="list">${
+      suppliers
+        .map((x) => {
+          const mine = purchases.filter((po) => po.supplierId === x.id && po.status !== "cancelled");
+          return `<li data-sup="${x.id}" style="cursor:pointer"><span><b>${esc(x.name)}</b>${x.phone ? ` · ${esc(x.phone)}` : ""}${x.contact ? ` · ${esc(x.contact)}` : ""}<br><span class="muted">yetkazish ${x.leadDays} kun · ${mine.length} ta zakup · ${goods().filter((p) => p.supplierId === x.id).length} ta mahsulot</span></span><b>${mine.reduce((n, po) => n + po.debt, 0) ? `qarz ${sum(mine.reduce((n, po) => n + po.debt, 0))}` : ""}</b></li>`;
+        })
+        .join("") || '<li class="muted">Hali ta\'minotchi yo\'q</li>'
+    }</ul><button class="btn" type="button" id="newSup" style="margin-top:12px">＋ Ta'minotchi</button>
+    <p class="muted" style="margin-top:10px">Mahsulotga ta'minotchini mahsulot formasida yoki Excel'dagi «Ta'minotchi» ustunida biriktiring.</p></div>`;
+    page.onclick = (e) => {
+      const li = e.target.closest("[data-sup]");
+      if (li || e.target.closest("#newSup")) supplierForm(suppliers.find((x) => x.id === li?.dataset.sup));
+    };
+    return;
+  }
+  if (purchaseTab === "orders") {
+    page.innerHTML = `${kpis}<div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>№</th><th>Ta'minotchi</th><th>Sana</th><th>Kutilmoqda</th><th class="num">Jami</th><th class="num">Keldi</th><th class="num">Qarz</th><th>Holat</th></tr></thead><tbody>${
+      purchases
+        .map((po) => {
+          const ordered = po.lines.reduce((n, l) => n + l.qty, 0);
+          const got = po.lines.reduce((n, l) => n + l.received, 0);
+          const late = ["sent", "partial"].includes(po.status) && po.expectedAt < Date.now();
+          return `<tr class="click" data-po="${po.id}"><td><b>PO-${po.number}</b></td><td>${esc(po.supplierName)}</td><td>${when(po.createdAt)}</td><td>${["sent", "partial"].includes(po.status) ? `<span style="color:${late ? "#c0392b" : "inherit"}">${when(po.expectedAt)}</span>` : "—"}</td><td class="num">${sum(po.total)}</td><td class="num">${got}/${ordered}</td><td class="num">${po.debt ? sum(po.debt) : "—"}</td><td>${pill(late ? ["Kechikmoqda", "bad"] : PO_STATE[po.status])}</td></tr>`;
+        })
+        .join("") || '<tr><td colspan="8" class="empty">Hali zakup yo\'q</td></tr>'
+    }</tbody></table></div>`;
+    page.onclick = (e) => {
+      const row = e.target.closest("[data-po]");
+      if (row) purchaseDrawer(purchases.find((x) => x.id === row.dataset.po));
+    };
+    return;
+  }
+  const groups = new Map();
+  for (const r of plan) {
+    const key = r.p.supplierId && suppliers.some((x) => x.id === r.p.supplierId) ? r.p.supplierId : "";
+    groups.set(key, [...(groups.get(key) ?? []), r]);
+  }
+  page.innerHTML = `${kpis}
+    <p class="muted" style="margin-top:12px">Hisob: oxirgi ${REORDER_DAYS} kun sotuvi, ta'minotchining yetkazish muddati va «Minimal qoldiq». Tavsiya = muddat + 30 kunlik sotuv (kamida minimal qoldiqning 2 baravari) − qoldiq − yo'ldagi zakup.</p>
+    ${
+      [...groups]
+        .map(([sid, rows]) => {
+          const supName = suppliers.find((x) => x.id === sid)?.name;
+          return `<div class="card" style="margin-top:16px" data-group="${sid}"><h3>${sid ? `🏭 ${esc(supName)}` : "⚠️ Ta'minotchi tanlanmagan"}</h3>
+            <div class="table-wrap"><table><thead><tr><th></th><th>SKU</th><th>Mahsulot</th><th class="num">Qoldiq</th><th class="num">Yo'lda</th><th class="num">Kunlik sotuv</th><th class="num">Yetadi</th><th class="num">Soni</th><th class="num">Narxi (tannarx)</th></tr></thead><tbody>${rows
+              .map((r) => `<tr><td><input type="checkbox" data-pick="${r.p.id}" checked ${sid ? "" : "disabled"}/></td><td>${r.p.sku ?? "—"}</td><td><b>${esc(r.p.name)}</b>${r.p.minStock != null ? `<br><span class="muted">minimal ${r.p.minStock}</span>` : ""}</td><td class="num">${pill([`${r.p.stock}`, r.p.stock <= 0 ? "bad" : "warn"])}</td><td class="num">${r.coming || "—"}</td><td class="num">${r.daily ? r.daily.toFixed(1) : "—"}</td><td class="num">${r.daysLeft === null ? "—" : `${r.daysLeft} kun`}</td><td class="num"><input class="input" style="width:90px" type="number" min="1" data-qty="${r.p.id}" value="${r.suggest}"/></td><td class="num"><input class="input" style="width:120px" type="number" min="0" data-cost="${r.p.id}" value="${r.p.cost ?? ""}" placeholder="so'm"/></td></tr>`)
+              .join("")}</tbody></table></div>
+            ${sid ? `<button class="btn" type="button" data-make="${sid}" style="margin-top:10px">📝 Zakup buyurtmasi yaratish</button>` : `<p class="note" style="margin-top:10px">Bu mahsulotlarga ta'minotchi biriktiring (Mahsulotlar → mahsulot → «Ta'minotchi» yoki Excel), keyin buyurtma tuzish mumkin.</p>`}</div>`;
+        })
+        .join("") || '<div class="card" style="margin-top:16px"><p class="empty">Hozircha hamma mahsulot yetarli 👍</p></div>'
+    }`;
+  page.onclick = async (e) => {
+    const make = e.target.closest("[data-make]");
+    if (!make) return;
+    const card = make.closest("[data-group]");
+    const lines = [...card.querySelectorAll("[data-pick]:checked")].map((c) => ({ productId: c.dataset.pick, qty: card.querySelector(`[data-qty="${c.dataset.pick}"]`).value, cost: card.querySelector(`[data-cost="${c.dataset.pick}"]`).value || 0 }));
+    try {
+      const po = await api("/api/purchases", { method: "POST", body: { supplierId: make.dataset.make, lines } });
+      toast(`PO-${po.number} yaratildi`);
+      purchaseTab = "orders";
+      render();
+      purchaseDrawer(po);
+    } catch (err) {
+      toast(err.message);
+    }
+  };
+};
+
+function poText(po) {
+  return [`Express Market — zakup PO-${po.number}`, `Ta'minotchi: ${po.supplierName}`, "", ...po.lines.map((l, i) => `${i + 1}. ${l.name}${l.sku ? ` (SKU ${l.sku})` : ""} — ${l.qty} ta${l.cost ? ` × ${sum(l.cost)}` : ""}`), "", `Jami: ${sum(po.total)} so'm`].join("\n");
+}
+
+function purchaseDrawer(po) {
+  openDrawer(`Zakup PO-${po.number}`, (body) => {
+    const receiving = ["sent", "partial"].includes(po.status);
+    body.innerHTML = `<p>${pill(PO_STATE[po.status])} <b>${esc(po.supplierName)}</b> · ${when(po.createdAt)}${po.sentAt ? ` · yuborilgan ${when(po.sentAt)}` : ""}</p>
+      <div class="table-wrap"><table><thead><tr><th>Mahsulot</th><th class="num">Buyurtma</th><th class="num">Keldi</th><th class="num">Narx</th>${receiving ? '<th class="num">Hozir keldi</th>' : ""}</tr></thead><tbody>${po.lines
+        .map((l) => `<tr><td>${esc(l.name)}<br><span class="muted">SKU ${l.sku ?? "—"}</span></td><td class="num">${l.qty}</td><td class="num">${l.received}</td><td class="num">${sum(l.cost)}</td>${receiving ? `<td class="num"><input class="input" style="width:80px" type="number" min="0" max="${l.qty - l.received}" data-rcv="${l.productId}" value="${l.qty - l.received}"/></td>` : ""}</tr>`)
+        .join("")}</tbody></table></div>
+      <dl class="specs" style="margin-top:12px"><dt>Jami</dt><dd><b>${sum(po.total)} so'm</b></dd><dt>To'langan</dt><dd>${sum(po.paid)} so'm${po.payments.length ? ` (${po.payments.map((x) => `${x.from === "cash" ? "kassa" : "bank"} ${sum(x.amount)}`).join(", ")})` : ""}</dd><dt>Qarz</dt><dd>${sum(po.debt)} so'm</dd>${receiving ? `<dt>Kutilmoqda</dt><dd>${when(po.expectedAt)}</dd>` : ""}</dl>
+      <div class="stack" style="margin-top:12px">
+        ${po.status === "draft" ? '<button class="btn" type="button" data-pa="send">📤 Yuborildi deb belgilash</button>' : ""}
+        <button class="btn btn--ghost" type="button" data-pa="copy">📋 Matnni nusxalash (fabrikaga)</button>
+        ${receiving ? '<button class="btn" type="button" data-pa="receive">📦 Qabul qilish (qoldiqqa qo\'shish)</button>' : ""}
+        ${["draft", "sent"].includes(po.status) && po.lines.every((l) => !l.received) ? '<button class="btn btn--ghost" type="button" data-pa="cancel">Bekor qilish</button>' : ""}
+      </div>
+      ${
+        po.debt && po.status !== "cancelled"
+          ? `<h3 style="margin:16px 0 8px">To'lov</h3><div class="row2"><label class="field">Summa<input class="input" id="payAmount" type="number" min="1" value="${po.debt}"/></label><label class="field">Qayerdan<select id="payFrom"><option value="bank">🏦 Bank (o'tkazma)</option><option value="cash">💵 Kassadan naqd</option></select></label></div><button class="btn btn--ghost" type="button" data-pa="pay">💸 To'lovni yozish</button>`
+          : ""
+      }
+      ${po.lines.some((l) => l.received) ? `<h3 style="margin:16px 0 8px">🏷 Yorliqlar</h3><ul class="list">${po.lines.filter((l) => l.received).map((l) => `<li><span>${esc(l.name)}</span><a class="btn btn--ghost" target="_blank" rel="noopener" href="/label.html?id=${encodeURIComponent(l.productId)}&count=${l.received}">Chop etish (${l.received})</a></li>`).join("")}</ul>` : ""}`;
+    body.onclick = async (e) => {
+      const act = e.target.closest("[data-pa]")?.dataset.pa;
+      if (!act) return;
+      if (act === "copy") return navigator.clipboard.writeText(poText(po)).then(() => toast("Nusxa olindi: fabrikaga yuboring"), () => toast("Nusxa olib bo'lmadi"));
+      if (act === "cancel" && !window.confirm(`PO-${po.number} bekor qilinsinmi?`)) return;
+      const payload = {
+        send: {},
+        cancel: {},
+        receive: { lines: [...body.querySelectorAll("[data-rcv]")].map((x) => ({ productId: x.dataset.rcv, qty: x.value })) },
+        pay: { amount: $("#payAmount", body)?.value, from: $("#payFrom", body)?.value },
+      }[act];
+      try {
+        const next = await api(`/api/purchases/${po.id}/${act}`, { method: "POST", body: payload });
+        toast({ send: "Yuborilgan deb belgilandi", cancel: "Bekor qilindi", receive: "Qoldiqqa qo'shildi", pay: "To'lov yozildi" }[act]);
+        if (act === "receive") await refreshProducts();
+        render();
+        purchaseDrawer(next);
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+  });
+}
+
+function supplierForm(x) {
+  openDrawer(x ? x.name : "Yangi ta'minotchi", (body) => {
+    body.innerHTML = `<form id="supForm" autocomplete="off">
+      <label class="field">Nomi (fabrika)<input class="input" name="supName" required value="${esc(x?.name)}" /></label>
+      <div class="row2"><label class="field">Telefon<input class="input" name="supPhone" value="${esc(x?.phone)}" /></label>
+      <label class="field">Mas'ul shaxs<input class="input" name="supContact" value="${esc(x?.contact)}" /></label></div>
+      <label class="field">Yetkazish muddati, kun (buyurtmadan omborgacha)<input class="input" name="supLead" type="number" min="1" max="180" value="${x?.leadDays ?? 7}" /></label>
+      <label class="field">Izoh<input class="input" name="supNote" value="${esc(x?.note)}" /></label>
+      <button class="btn" type="submit" style="margin-top:10px">Saqlash</button></form>`;
+    $("#supForm", body).onsubmit = async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      try {
+        await api(x ? `/api/suppliers/${x.id}` : "/api/suppliers", { method: x ? "PUT" : "POST", body: { name: f.get("supName"), phone: f.get("supPhone"), contact: f.get("supContact"), leadDays: f.get("supLead"), note: f.get("supNote") } });
+        toast("Saqlandi");
+        closeDrawer();
         render();
       } catch (err) {
         toast(err.message);
@@ -1705,6 +1895,7 @@ const TITLES = {
   complaints: "Shikoyatlar",
   products: "Mahsulotlar (SKU)",
   stock: "Ombor",
+  purchases: "Zakup",
   finance: "Moliya",
   cash: "Kassa",
   accounting: "Buxgalteriya",
@@ -1766,7 +1957,7 @@ window.addEventListener("hashchange", () => {
   }
   if (!token) return showLogin();
   try {
-    [state.info] = await Promise.all([api("/api/admin/info"), refreshProducts()]);
+    [state.info, , state.suppliers] = await Promise.all([api("/api/admin/info"), refreshProducts(), api("/api/suppliers")]);
   } catch (err) {
     return showLogin(err.message);
   }

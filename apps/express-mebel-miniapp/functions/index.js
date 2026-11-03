@@ -46,6 +46,8 @@ const applicationsCol = db.collection("driverApplications");
 const complaintsCol = db.collection("complaints");
 const cashbookCol = db.collection("cashbook");
 const cashRef = db.collection("meta").doc("cash");
+const suppliersCol = db.collection("suppliers");
+const purchasesCol = db.collection("purchases");
 const countersRef = db.collection("meta").doc("counters");
 const deliveryRef = db.collection("meta").doc("delivery");
 const segmentsRef = db.collection("meta").doc("segments");
@@ -137,6 +139,13 @@ function cleanKitParts(raw) {
   return [...qtyById].map(([id, qty]) => ({ id, qty }));
 }
 
+function cleanMinStock(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Math.round(Number(value));
+  if (!(n >= 0 && n <= 100000)) throw new HttpError(400, "Minimal qoldiq noto'g'ri");
+  return n;
+}
+
 function cleanCost(value) {
   if (value === null || value === undefined || value === "") return null;
   const n = Math.round(Number(value));
@@ -205,6 +214,9 @@ function cleanProduct(input, existing = {}) {
     boxes: Math.min(20, Math.max(1, Math.round(Number(input.boxes ?? existing.boxes ?? 1)) || 1)),
     // Purchase cost per unit for profit reports; only admins ever see it.
     cost: cleanCost(input.cost === undefined ? existing.cost : input.cost),
+    // Reordering: who supplies it and the stock level that should trigger a purchase.
+    supplierId: input.supplierId === undefined ? (existing.supplierId ?? null) : String(input.supplierId || "").slice(0, 64) || null,
+    minStock: cleanMinStock(input.minStock === undefined ? existing.minStock : input.minStock),
     // Packed weight per unit, kg; logistics sums it against the vehicle's load limit. Optional.
     weight: cleanWeight(input.weight === undefined ? existing.weight : input.weight),
     sku: existing.sku ?? null,
@@ -551,6 +563,8 @@ const IMPORT_FIELDS = {
   boxes: "qutilar",
   weight: "og'irlik",
   cost: "tannarx",
+  minStock: "minimal qoldiq",
+  supplierId: "ta'minotchi",
   size: "o'lcham",
   material: "material",
   description: "tavsif",
@@ -597,6 +611,9 @@ async function importProducts(rows, { apply, actor }) {
   if (rows.length > IMPORT_MAX_ROWS) throw new HttpError(400, `Bir martada ${IMPORT_MAX_ROWS} qatordan ko'p bo'lmasin`);
   const all = (await productsCol.get()).docs.map((d) => ({ id: d.id, ...d.data() }));
   const byId = new Map(all.map((p) => [p.id, p]));
+  const suppliers = (await suppliersCol.get()).docs;
+  const supplierByName = new Map(suppliers.map((d) => [d.data().name.trim().toLowerCase(), d.id]));
+  const supplierName = new Map(suppliers.map((d) => [d.id, d.data().name]));
   const bySku = new Map(all.filter((p) => p.sku != null).map((p) => [String(p.sku), p]));
   const nameKey = (kind, name) => `${kind}:${String(name).trim().toLowerCase()}`;
   const byName = new Map(all.map((p) => [nameKey(p.kind ?? "item", p.name), p]));
@@ -636,7 +653,13 @@ async function importProducts(rows, { apply, actor }) {
     try {
       for (const [field, label] of Object.entries(IMPORT_FIELDS)) {
         const v = raw[field];
-        if (["price", "oldPrice", "boxes", "weight", "cost", "leadDays"].includes(field)) input[field] = importNumber(v, label);
+        if (["price", "oldPrice", "boxes", "weight", "cost", "minStock", "leadDays"].includes(field)) input[field] = importNumber(v, label);
+        else if (field === "supplierId") {
+          if (blank(v)) continue;
+          const id = supplierByName.get(String(v).trim().toLowerCase());
+          if (!id) throw new Error(`Ta'minotchi topilmadi: «${v}». Avval Zakup → Ta'minotchilar'ga qo'shing`);
+          input[field] = id;
+        }
         else if (["standalone", "isNew", "draft"].includes(field)) input[field] = importFlag(v, label);
         else if (field === "category") input[field] = blank(v) ? undefined : importCategory(v);
         else if (field === "whenShort") input[field] = blank(v) ? undefined : /yash|hide/i.test(String(v)) ? "hide" : "preorder";
@@ -688,8 +711,9 @@ async function importProducts(rows, { apply, actor }) {
         const before = base[field] ?? null;
         const after = r.next[field] ?? null;
         if (r.kind === "item" && ["whenShort", "leadDays"].includes(field)) continue;
-        if (r.kind === "kit" && ["boxes", "weight", "cost", "standalone"].includes(field)) continue;
-        if (JSON.stringify(before) !== JSON.stringify(after)) r.changes.push(`${label}: ${show(before)} → ${show(after)}`);
+        if (r.kind === "kit" && ["boxes", "weight", "cost", "minStock", "supplierId", "standalone"].includes(field)) continue;
+        const named = (v) => (field === "supplierId" && v ? supplierName.get(v) ?? v : v);
+        if (JSON.stringify(before) !== JSON.stringify(after)) r.changes.push(`${label}: ${show(named(before))} → ${show(named(after))}`);
       }
       if (r.kind === "kit" && JSON.stringify(r.existing.components) !== JSON.stringify(r.next.components)) r.changes.push("komplekt tarkibi");
     }
@@ -1274,6 +1298,8 @@ function orderSummary(id, o) {
     // The buyer's Telegram account: the CRM merges orders placed with different phone numbers.
     customerId: o.telegramUserId ?? null,
     lines: o.items.map((i) => ({ id: i.id, name: i.name, qty: i.qty, price: i.price, kind: i.kind ?? "item" })),
+    // Physical modules sold (kits expanded): the reorder report counts sales speed from these.
+    units: pickLines(o).map((l) => ({ id: l.id, qty: l.qty })),
     deliverySlot: o.deliverySlot ?? null,
     deliveryLabel: o.deliveryLabel ?? null,
     cancelRequest: o.cancelRequest ?? null,
@@ -2825,8 +2851,9 @@ const CASH_OUT = {
   refund: "Mijozga qaytarildi",
   other: "Boshqa chiqim",
 };
-// Bank deposits move money, refunds reduce revenue: neither is an operating expense.
-const NOT_EXPENSE = new Set(["bank", "refund"]);
+// Bank deposits move money, refunds reduce revenue and stock purchases reach profit through the
+// product cost when the goods sell: none of them is an operating expense.
+const NOT_EXPENSE = new Set(["bank", "refund", "purchase"]);
 
 // Writes one ledger line and moves the balance; `t` already read the cash doc (`balance`).
 function bookCash(t, balance, entry) {
@@ -2936,6 +2963,160 @@ async function handleCash(req, res, path, method) {
     return res.json({ ok: true, balance: next });
   }
   return null;
+}
+
+// ---------- purchasing ("zakup"): suppliers, purchase orders, receiving ----------
+// The panel suggests what to reorder from sales speed and each product's minimum; a purchase order
+// goes draft → sent → partial/received. Receiving books stock in (journal note "Zakup PO-n") and
+// takes the line price as the product's new cost. Payments come from the cash desk or the bank and
+// leave a supplier debt until paid in full. Buying stock is not an expense: its cost reaches the
+// profit report through the product cost when the goods sell.
+
+const poNo = (p) => `PO-${p.number}`;
+
+function cleanSupplier(input) {
+  const name = String(input.name || "").trim().slice(0, 80);
+  if (!name) throw new HttpError(400, "Ta'minotchi nomini kiriting");
+  const lead = Math.round(Number(input.leadDays ?? 7));
+  if (!(lead >= 1 && lead <= 180)) throw new HttpError(400, "Yetkazish muddati (kun) noto'g'ri");
+  return {
+    name,
+    phone: String(input.phone || "").trim().slice(0, 40),
+    contact: String(input.contact || "").trim().slice(0, 80),
+    note: String(input.note || "").trim().slice(0, 300),
+    leadDays: lead,
+    active: input.active !== false,
+    updatedAt: Date.now(),
+  };
+}
+
+const poTotal = (lines) => lines.reduce((n, l) => n + l.qty * l.cost, 0);
+const poPaid = (p) => (p.payments ?? []).reduce((n, x) => n + x.amount, 0);
+const poView = (id, p) => ({ id, ...p, total: poTotal(p.lines), paid: poPaid(p), debt: Math.max(0, poTotal(p.lines) - poPaid(p)) });
+
+async function handlePurchases(req, res, path, method) {
+  if (path === "/api/suppliers" && method === "GET") {
+    await requireRole(req, "admin");
+    const snap = await suppliersCol.get();
+    return res.json(snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => a.name.localeCompare(b.name)));
+  }
+  if (path === "/api/suppliers" && method === "POST") {
+    await requireRole(req, "admin");
+    const ref = suppliersCol.doc();
+    const data = { ...cleanSupplier(req.body || {}), createdAt: Date.now() };
+    await ref.set(data);
+    return res.status(201).json({ id: ref.id, ...data });
+  }
+  const sup = path.match(/^\/api\/suppliers\/([\w-]{1,64})$/);
+  if (sup && method === "PUT") {
+    await requireRole(req, "admin");
+    const data = cleanSupplier(req.body || {});
+    await suppliersCol.doc(sup[1]).update(data);
+    return res.json({ id: sup[1], ...data });
+  }
+
+  if (path === "/api/purchases" && method === "GET") {
+    await requireRole(req, "admin");
+    const snap = await purchasesCol.orderBy("createdAt", "desc").limit(300).get();
+    return res.json(snap.docs.map((d) => poView(d.id, d.data())));
+  }
+  if (path === "/api/purchases" && method === "POST") {
+    const { user } = await requireRole(req, "admin");
+    const body = req.body || {};
+    const supplier = (await suppliersCol.doc(String(body.supplierId || "-")).get()).data();
+    if (!supplier) throw new HttpError(400, "Ta'minotchini tanlang");
+    const raw = (Array.isArray(body.lines) ? body.lines : []).filter((l) => Math.round(Number(l.qty)) > 0);
+    if (!raw.length) throw new HttpError(400, "Kamida bitta mahsulot va sonini kiriting");
+    if (raw.length > 200) throw new HttpError(400, "Bitta buyurtmada 200 xildan ko'p bo'lmasin");
+    const snaps = await db.getAll(...raw.map((l) => productsCol.doc(String(l.productId || "-"))));
+    const lines = raw.map((l, i) => {
+      const p = snaps[i].data();
+      if (!p || p.kind === "kit") throw new HttpError(400, "Komplekt emas, modul yoki mahsulot tanlang");
+      const qty = Math.round(Number(l.qty));
+      const cost = Math.round(Number(l.cost ?? p.cost ?? 0));
+      if (!(qty > 0 && qty <= 100000) || !(cost >= 0)) throw new HttpError(400, `«${p.name}»: soni yoki narxi noto'g'ri`);
+      return { productId: snaps[i].id, name: p.name, sku: p.sku ?? null, qty, cost, received: 0 };
+    });
+    const ref = purchasesCol.doc();
+    const data = await db.runTransaction(async (t) => {
+      const n = ((await t.get(countersRef)).data()?.purchase ?? 0) + 1;
+      const po = {
+        number: n,
+        supplierId: String(body.supplierId),
+        supplierName: supplier.name,
+        lines,
+        status: "draft",
+        note: String(body.note || "").trim().slice(0, 300),
+        expectedAt: Date.now() + supplier.leadDays * 24 * 60 * 60 * 1000,
+        payments: [],
+        createdAt: Date.now(),
+        createdBy: staffName(user),
+      };
+      t.set(countersRef, { purchase: n }, { merge: true });
+      t.set(ref, po);
+      return po;
+    });
+    return res.status(201).json(poView(ref.id, data));
+  }
+  const m = path.match(/^\/api\/purchases\/([\w-]{1,64})\/(send|receive|pay|cancel)$/);
+  if (!m || method !== "POST") return null;
+  const { user } = await requireRole(req, "admin");
+  const [, id, action] = m;
+  const ref = purchasesCol.doc(id);
+  const by = staffName(user);
+  const body = req.body || {};
+  const po = await db.runTransaction(async (t) => {
+    const snap = await t.get(ref);
+    const p = snap.data();
+    if (!p) throw new HttpError(404, "Zakup buyurtmasi topilmadi");
+    if (action === "send") {
+      if (p.status !== "draft") throw new HttpError(409, "Buyurtma allaqachon yuborilgan");
+      const sup = (await t.get(suppliersCol.doc(p.supplierId))).data();
+      const next = { status: "sent", sentAt: Date.now(), sentBy: by, expectedAt: Date.now() + (sup?.leadDays ?? 7) * 24 * 60 * 60 * 1000 };
+      t.update(ref, next);
+      return { ...p, ...next };
+    }
+    if (action === "cancel") {
+      if (!["draft", "sent"].includes(p.status) || p.lines.some((l) => l.received > 0)) throw new HttpError(409, "Qabul qilingan buyurtmani bekor qilib bo'lmaydi");
+      t.update(ref, { status: "cancelled", cancelledAt: Date.now(), cancelledBy: by });
+      return { ...p, status: "cancelled" };
+    }
+    if (action === "pay") {
+      const amount = Math.round(Number(body.amount));
+      const debt = poTotal(p.lines) - poPaid(p);
+      if (!(amount > 0 && amount <= debt)) throw new HttpError(400, `To'lov summasi 0 dan ${formatSum(debt)} gacha bo'lsin`);
+      const from = body.from === "cash" ? "cash" : "bank";
+      const cash = from === "cash" ? await t.get(cashRef) : null;
+      const payment = { amount, from, at: Date.now(), by, note: String(body.note || "").trim().slice(0, 200) };
+      if (cash) bookCash(t, cash.data()?.balance ?? 0, { type: "out", category: "purchase", amount, note: `${poNo(p)} · ${p.supplierName}`, purchaseId: id, by });
+      const payments = [...(p.payments ?? []), payment];
+      t.update(ref, { payments });
+      return { ...p, payments };
+    }
+    // receive: quantities per product, never more than ordered and still open
+    if (!["sent", "partial"].includes(p.status)) throw new HttpError(409, "Avval buyurtmani yuboring (holati: yuborilgan bo'lishi kerak)");
+    const want = new Map((Array.isArray(body.lines) ? body.lines : []).map((l) => [String(l.productId), Math.round(Number(l.qty))]));
+    const take = p.lines.filter((l) => want.get(l.productId) > 0);
+    if (!take.length) throw new HttpError(400, "Qabul qilingan sonni kiriting");
+    for (const l of take) {
+      if (want.get(l.productId) > l.qty - l.received) throw new HttpError(400, `«${l.name}»: buyurtmada qolgani ${l.qty - l.received} ta`);
+    }
+    const prodSnaps = await t.getAll(...take.map((l) => productsCol.doc(l.productId)));
+    take.forEach((l, i) => {
+      const product = prodSnaps[i].data();
+      if (!product) throw new HttpError(404, `«${l.name}» mahsuloti o'chirilgan`);
+      const qty = want.get(l.productId);
+      // The latest purchase price becomes the cost the profit report uses.
+      if (l.cost > 0) t.update(prodSnaps[i].ref, { cost: l.cost });
+      moveStock(t, prodSnaps[i].ref, product, "in", qty, `Zakup ${poNo(p)} · ${p.supplierName}`, by);
+    });
+    const lines = p.lines.map((l) => ({ ...l, received: l.received + (want.get(l.productId) > 0 ? want.get(l.productId) : 0) }));
+    const done = lines.every((l) => l.received >= l.qty);
+    const next = { lines, status: done ? "received" : "partial", ...(done ? { receivedAt: Date.now() } : {}), lastReceivedAt: Date.now(), lastReceivedBy: by };
+    t.update(ref, next);
+    return { ...p, ...next };
+  });
+  return res.json(poView(id, po));
 }
 
 async function handleLogistics(req, res, path, method) {
@@ -3094,6 +3275,10 @@ async function route(req, res) {
 
   if (path === "/api/telegram" && method === "POST") return handleTelegramUpdate(req, res);
   if (path === "/api/driverbot" && method === "POST") return handleDriverBot(req, res);
+  if (path.startsWith("/api/suppliers") || path.startsWith("/api/purchases")) {
+    const handled = await handlePurchases(req, res, path, method);
+    if (handled !== null) return handled;
+  }
   if (path.startsWith("/api/cash")) {
     const handled = await handleCash(req, res, path, method);
     if (handled !== null) return handled;

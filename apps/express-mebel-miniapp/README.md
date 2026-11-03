@@ -219,6 +219,18 @@ Haydovchi Telegram ilovada **☰ → 🚚 Reyslarim**:
 
 Mahsulot og'irligi (kg) mahsulot formasida yoki Excel'dagi "Og'irligi, kg" ustunida kiritiladi; komplekt og'irligi modullardan hisoblanadi.
 
+## Zakup (ta'minotchilar va kirim)
+
+Panel → **🏭 Zakup**:
+- **Ta'minotchilar:** nomi, telefon, mas'ul, **yetkazish muddati (kun)**. Mahsulotga ta'minotchi va **Minimal qoldiq** mahsulot formasida yoki Excel'da biriktiriladi.
+- **Buyurtma berish kerak:** tizim o'zi hisoblaydi — oxirgi 30 kun sotuvi, yetkazish muddati va minimal qoldiq bo'yicha.
+  Tavsiya = muddat + 30 kunlik sotuv (kamida minimal qoldiqning 2 baravari) − qoldiq − yo'ldagi zakup. Ta'minotchi bo'yicha guruhlanadi;
+  soni va narxini o'zgartirib **Zakup buyurtmasi yaratish**.
+- **Zakup buyurtmasi (PO):** Qoralama → **Yuborildi** (matnni nusxalab fabrikaga yuborasiz) → **Qabul qilish** (qisman ham bo'ladi):
+  qoldiqqa kirim bo'ladi (jurnalda "Zakup PO-n"), tannarx oxirgi kirim narxiga yangilanadi, yorliqlarni shu yerdan chop etasiz.
+- **To'lov:** bank yoki kassadan naqd (kassada chiqim bo'ladi); ta'minotchiga qarz ko'rinadi. Zakup to'lovi xarajat emas —
+  foydaga mahsulot sotilganda tannarx orqali tushadi.
+
 ## Kassa va moliya
 
 Panel → **💵 Kassa**:
