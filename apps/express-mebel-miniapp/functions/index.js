@@ -2259,12 +2259,15 @@ async function handleRegistration(msg) {
   const ref = applicationsCol.doc(String(msg.from.id));
   const snap = await ref.get();
   const a = snap.data();
-  const restart = msg.text === "/start" && (!a || a.status === "rejected" || a.status === "draft");
+  // Only non-drivers get here, so an "approved" application belongs to a driver HR later removed:
+  // they register again like a rejected applicant.
+  const restart = msg.text === "/start" && (!a || a.status !== "pending");
   if (!a || restart) {
     await ref.set({ telegramId: msg.from.id, username: msg.from.username || "", step: "phone", status: "draft", createdAt: Date.now() });
     return regPrompt(msg.chat.id, "phone");
   }
   if (a.status === "pending") return dtg("sendMessage", { chat_id: msg.chat.id, text: "⏳ Arizangiz HR bo'limida ko'rib chiqilmoqda. Javob shu yerga keladi." });
+  if (a.status !== "draft") return dtg("sendMessage", { chat_id: msg.chat.id, text: "Qayta ro'yxatdan o'tish uchun /start bosing." });
   if (a.step === "confirm") return regPrompt(msg.chat.id, "confirm", a);
   const answer = regAnswer(a.step, msg);
   if (answer.error) return dtg("sendMessage", { chat_id: msg.chat.id, text: answer.error });
