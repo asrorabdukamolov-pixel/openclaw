@@ -390,7 +390,7 @@ function verifyInitData(initData) {
     .map(([k, v]) => `${k}=${v}`)
     .sort()
     .join("\n");
-  const secret = createHmac("sha256", "WebAppData").update(BOT_TOKEN.value()).digest();
+  const secret = createHmac("sha256", "WebAppData").update(BOT_TOKEN.value().trim()).digest();
   const expected = createHmac("sha256", secret).update(dataCheckString).digest("hex");
   if (!sameSecret(expected, hash)) return null;
   const authDate = Number(params.get("auth_date"));
@@ -441,8 +441,10 @@ async function requireRole(req, ...roles) {
 
 const tg = (method, body) => callTelegram(BOT_TOKEN.value(), method, body);
 
+// Tokens are pasted into Secret Manager by hand; a trailing newline or space there makes Telegram
+// answer "Not Found", so every bot call trims the token it is given.
 async function callTelegram(token, method, body) {
-  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+  const res = await fetch(`https://api.telegram.org/bot${token.trim()}/${method}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -2634,7 +2636,7 @@ const complaintNo = (c) => `S-${c.number}`;
 
 async function saveBotPhoto(token, fileId, path) {
   const file = await callTelegram(token, "getFile", { file_id: fileId });
-  const res = await fetch(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
+  const res = await fetch(`https://api.telegram.org/file/bot${token.trim()}/${file.file_path}`);
   if (!res.ok) throw new Error(`photo download ${res.status}`);
   return saveBuffer(Buffer.from(await res.arrayBuffer()), `${path}.jpg`, "image/jpeg");
 }
