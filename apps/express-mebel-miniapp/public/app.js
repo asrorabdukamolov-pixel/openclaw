@@ -56,7 +56,9 @@ const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const byId = (id) => state.products.find((p) => p.id === id);
 const isAdmin = () => state.role === "admin";
-const isStaff = () => state.role !== null;
+// Staff = people who work the warehouse (they see drafts and stock); drivers only get their routes.
+const isStaff = () => state.role === "admin" || state.role === "warehouse";
+const isDriver = () => state.role === "driver";
 const cover = (p) => p.images?.[0] || `/img/${p.category}.svg`;
 const haptic = (type = "light") => tg?.HapticFeedback?.impactOccurred(type);
 
@@ -718,6 +720,7 @@ function productForm(id, newKind = "item") {
     const title = p ? (kit ? "Komplektni tahrirlash" : "Mahsulotni tahrirlash") : kit ? "Yangi komplekt" : "Yangi mahsulot / modul";
     const itemFields = `
         <label class="field">Qutilar soni (1 dona nechta qutida keladi)<input name="boxes" type="number" inputmode="numeric" min="1" max="20" required value="${p?.boxes ?? 1}" /></label>
+        <label class="field">Og'irligi, kg (qadoq bilan, ixtiyoriy)<input name="weight" type="number" inputmode="decimal" min="0" step="0.1" value="${p?.weight ?? ""}" /></label>
         <label class="check"><input type="checkbox" name="standalone" ${p?.standalone === false ? "" : "checked"} /> Katalogda alohida sotiladi (komplekt moduli bo'lsa, belgini olib tashlang)</label>`;
     const kitFields = `
         <div class="field">Komplekt tarkibi (modullar)</div>
@@ -884,7 +887,7 @@ function productForm(id, newKind = "item") {
       };
       const payload = kit
         ? { ...common, kind: "kit", components: parts, whenShort: f.get("whenShort"), leadDays: Number(f.get("leadDays")) }
-        : { ...common, kind: "item", boxes: Number(f.get("boxes")), standalone: f.has("standalone"), stock: Number(f.get("stock") || 0) };
+        : { ...common, kind: "item", boxes: Number(f.get("boxes")), weight: f.get("weight") || null, standalone: f.has("standalone"), stock: Number(f.get("stock") || 0) };
       const btn = e.target.querySelector("button[type=submit]");
       btn.disabled = true;
       try {
@@ -1340,6 +1343,96 @@ function panelLinkSheet(body) {
     .catch((err) => toast(err.message));
 }
 
+// ---------- driver: today's routes ----------
+const ROUTE_STATUS = { planned: "Rejada", started: "Yo'lda", done: "Tugadi" };
+// Google Maps takes up to 9 waypoints in a link; longer routes open stop by stop.
+function routeMapLink(stops) {
+  const pts = stops.filter((s) => s.location && !s.handedAt && s.stage !== "delivered").map((s) => `${s.location.lat},${s.location.lon}`);
+  if (!pts.length) return null;
+  const dest = pts.pop();
+  const way = pts.slice(0, 9).join("|");
+  return `https://www.google.com/maps/dir/?api=1&destination=${dest}${way ? `&waypoints=${encodeURIComponent(way)}` : ""}&travelmode=driving`;
+}
+const openExternal = (url) => (tg?.openLink ? tg.openLink(url) : window.open(url, "_blank"));
+
+function stopHtml(s, i, route) {
+  const done = s.handedAt || s.stage === "delivered";
+  const pay = s.toCollect ? `💵 Naqd oling: <b>${sum(s.toCollect)} so'm</b>` : "💳 To'langan";
+  const floor = s.floor ? ` · ${s.floor}-qavat${s.lift ? ", lift bor" : s.floor > 2 ? ", liftsiz" : ""}` : "";
+  return `<div class="stop${done ? " stop--done" : ""}">
+    <div class="stop-head"><span class="stop-no">${done ? "✓" : i + 1}</span><b>#${s.number} · ${esc(s.name)}</b><small>${esc((s.deliveryLabel || "").split(", ").at(-1))}</small></div>
+    <p>${esc(s.address || "Manzil yozilmagan")}${floor}</p>
+    ${s.comment ? `<p class="hint">💬 ${esc(s.comment)}</p>` : ""}
+    <p class="hint">${esc(s.lines.join(", "))} · ${s.boxes} quti${s.weight ? ` · ${s.weight} kg` : ""}</p>
+    <p>${pay}</p>
+    <div class="stop-acts">
+      <a class="btn btn--ghost" href="tel:${esc(s.phone)}">📞 ${esc(s.phone)}</a>
+      ${s.location ? `<button class="btn btn--ghost" data-map="${s.location.lat},${s.location.lon}">📍 Xarita</button>` : ""}
+      ${route.status === "started" && !done ? `<button class="btn" data-hand="${s.id}" data-no="${s.number}" data-cash="${s.toCollect}">🤝 Topshirdim</button>` : ""}
+    </div>
+  </div>`;
+}
+
+function routesSheet(body) {
+  let routes = null;
+  const draw = () => {
+    body.innerHTML = `<h3>🚚 Reyslarim</h3>${
+      routes === null
+        ? '<p class="empty">Yuklanmoqda…</p>'
+        : routes.length
+          ? routes
+              .map((r) => {
+                const left = r.stops.filter((s) => !s.handedAt && s.stage !== "delivered").length;
+                const cash = r.stops.reduce((n, s) => n + s.toCollect, 0);
+                const boxes = r.stops.reduce((n, s) => n + s.boxes, 0);
+                const map = routeMapLink(r.stops);
+                return `<section class="route">
+                  <div class="route-head"><b>${esc(r.dateLabel)}</b><span class="chip">${ROUTE_STATUS[r.status]}</span></div>
+                  <p class="hint">${esc(r.vehicleName)} · ${r.stops.length} ta manzil · ${boxes} quti${r.km ? ` · ~${r.km} km` : ""}${cash ? ` · naqd ${sum(cash)} so'm` : ""}</p>
+                  <div class="stop-acts">
+                    ${r.status === "planned" ? `<button class="btn" data-start="${r.id}">▶️ Reysni boshlash</button>` : ""}
+                    ${map && r.status !== "done" ? `<button class="btn btn--ghost" data-route-map="${esc(map)}">🗺 Butun marshrut</button>` : ""}
+                  </div>
+                  ${r.status === "started" ? `<p class="hint">Qoldi: ${left} ta manzil</p>` : ""}
+                  ${r.stops.map((s, i) => stopHtml(s, i, r)).join("")}
+                </section>`;
+              })
+              .join("")
+          : '<p class="empty">Hozircha sizga reys biriktirilmagan. Reys tuzilganda bot xabar beradi.</p>'
+    }`;
+  };
+  const run = (promise) =>
+    promise
+      .then((list) => {
+        routes = list;
+        draw();
+      })
+      .catch((err) => toast(err.message));
+  body.onclick = async (e) => {
+    const start = e.target.closest("[data-start]");
+    const hand = e.target.closest("[data-hand]");
+    const map = e.target.closest("[data-map]");
+    const routeMap = e.target.closest("[data-route-map]");
+    if (map) return openExternal(`https://maps.google.com/?q=${map.dataset.map}`);
+    if (routeMap) return openExternal(routeMap.dataset.routeMap);
+    if (start) {
+      if (!(await confirmDialog("Mebel mashinaga yuklandimi? Reys boshlansa, mijozlarga «yo'lga chiqdi» xabari boradi."))) return;
+      start.disabled = true;
+      return run(api(`/api/driver/routes/${start.dataset.start}/start`, { method: "POST" }));
+    }
+    if (hand) {
+      const cash = Number(hand.dataset.cash);
+      const ask = cash ? `#${hand.dataset.no}: mebelni topshirib, ${sum(cash)} so'm naqd oldingizmi?` : `#${hand.dataset.no}: mebelni topshirdingizmi?`;
+      if (!(await confirmDialog(ask))) return;
+      haptic("medium");
+      hand.disabled = true;
+      return run(api(`/api/driver/stops/${hand.dataset.hand}/handed`, { method: "POST" }));
+    }
+  };
+  draw();
+  run(api("/api/driver/routes"));
+}
+
 // ---------- delivery rates (admin) ----------
 // Accepts "41.31, 69.27" or a Google / Yandex Maps link with coordinates in it.
 function parseCoords(text) {
@@ -1409,7 +1502,7 @@ function deliverySettingsSheet(body) {
 }
 
 // ---------- staff (admin) ----------
-const STAFF_ROLE_LABEL = { warehouse: "Omborchi" };
+const STAFF_ROLE_LABEL = { warehouse: "Omborchi", driver: "Haydovchi" };
 
 function shareInvite(link) {
   const text = "Express Market omborchisi sifatida qo'shilish uchun havolani bosing va botda Start ni bosing:";
@@ -1624,6 +1717,7 @@ function openDrawer() {
     ...(state.user ? [["mine", "🧾  Mening buyurtmalarim"]] : []),
     ...state.categories.map((c) => [`cat:${c.id}`, c.name]),
     ...(isStaff() ? [["stock", "📦  Ombor"]] : []),
+    ...(isDriver() ? [["routes", "🚚  Reyslarim"]] : []),
     ...(isAdmin()
       ? [
           ["panel", "💻  Kompyuterda ochish"],
@@ -1663,6 +1757,7 @@ $("#drawerNav").onclick = (e) => {
   if (k === "orders") openSheet(ordersListSheet(true));
   if (k === "delivery") openSheet(deliverySettingsSheet);
   if (k === "panel") openSheet(panelLinkSheet);
+  if (k === "routes") openSheet(routesSheet);
   if (k.startsWith("cat:")) document.querySelector(`[data-tab="${k.slice(4)}"]`)?.click();
 };
 
@@ -1696,7 +1791,7 @@ $("#search").oninput = (e) => {
 $("#cartFab").onclick = () => openSheet(cartSheet);
 $("#orderTypeBtn").onclick = () => openSheet(orderTypeSheet);
 $("#menuBtn").onclick = openDrawer;
-$("#avatarBtn").onclick = () => openSheet(isAdmin() ? adminSheet : isStaff() ? warehouseSheet : cartSheet);
+$("#avatarBtn").onclick = () => openSheet(isAdmin() ? adminSheet : isStaff() ? warehouseSheet : isDriver() ? routesSheet : cartSheet);
 $("#backdrop").onclick = closeAll;
 tg?.BackButton?.onClick(back);
 window.addEventListener("scroll", onScroll, { passive: true });
@@ -1720,6 +1815,8 @@ async function reload() {
     state.user = config.user;
     state.cardPayments = config.cardPayments;
     await reload();
+    // The route notice opens the app at #reys.
+    if (location.hash === "#reys" && isDriver()) openSheet(routesSheet);
   } catch (err) {
     toast(err.message);
   }

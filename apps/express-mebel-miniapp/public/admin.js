@@ -370,6 +370,7 @@ const XLS_COLUMNS = [
   ["oldPrice", "Eski narx", "Chegirma uchun: narxdan katta bo'lsin. Bo'sh = chegirma yo'q."],
   ["stock", "Qoldiq", "Ombordagi soni. O'zgarsa, ombor jurnaliga «Excel import» bo'lib yoziladi. Komplektda yozilmaydi."],
   ["boxes", "Qutilar soni", "Bitta mahsulot nechta qutida (har qutiga alohida yorliq)."],
+  ["weight", "Og'irligi, kg", "Bitta mahsulot qadog'i bilan, kg. Logistika mashina sig'imini shu bo'yicha hisoblaydi. Komplektda yozilmaydi."],
   ["size", "O'lcham", "Masalan: 120×60×75 sm"],
   ["material", "Material", "Masalan: LDSP 16 mm"],
   ["description", "Tavsif", "Mijoz ko'radigan matn."],
@@ -400,7 +401,7 @@ async function exportCatalog() {
     const kit = isKit(p);
     const cells = {
       id: p.id, sku: kit ? "" : p.sku ?? "", kind: kit ? "Komplekt" : "Mahsulot", name: p.name, category: catName(p.category),
-      price: p.price, oldPrice: p.oldPrice ?? "", stock: kit ? "" : p.stock, boxes: kit ? "" : p.boxes ?? 1,
+      price: p.price, oldPrice: p.oldPrice ?? "", stock: kit ? "" : p.stock, boxes: kit ? "" : p.boxes ?? 1, weight: kit ? "" : p.weight ?? "",
       size: p.size ?? "", material: p.material ?? "", description: p.description ?? "",
       standalone: kit ? "" : yesNo(p.standalone !== false), isNew: yesNo(p.isNew), draft: yesNo(p.draft),
       components: kit ? p.parts.map((c) => `${c.sku ?? c.name}×${c.qty}`).join("; ") : "",
@@ -589,6 +590,7 @@ function productForm(id, newKind = "item") {
              <label class="field">Tayyorlash muddati (kun)<input class="input" name="leadDays" type="number" min="1" max="120" value="${p?.leadDays ?? 10}" /></label></div>`
           : `<div class="row2"><label class="field">Qutilar soni<input class="input" name="boxes" type="number" min="1" max="20" value="${p?.boxes ?? 1}" /></label>
              ${p ? `<div class="field">Omborda<b style="color:var(--ink);font-size:16px">${p.stock} ta</b></div>` : `<label class="field">Boshlang'ich qoldiq<input class="input" name="stock" type="number" min="0" value="0" /></label>`}</div>
+             <label class="field">Og'irligi, kg (qadoq bilan, ixtiyoriy)<input class="input" name="weight" type="number" min="0" step="0.1" value="${p?.weight ?? ""}" placeholder="logistika uchun" /></label>
              <label class="check"><input type="checkbox" name="standalone" ${p?.standalone === false ? "" : "checked"} /> Katalogda alohida sotiladi</label>`
       }
       <label class="field">Tavsif<textarea name="description" rows="4">${esc(p?.description)}</textarea></label>
@@ -678,7 +680,7 @@ function productForm(id, newKind = "item") {
       };
       const payload = kit
         ? { ...common, kind: "kit", components: parts, whenShort: f.get("whenShort"), leadDays: Number(f.get("leadDays")) }
-        : { ...common, kind: "item", boxes: Number(f.get("boxes")), standalone: f.has("standalone"), stock: Number(f.get("stock") || 0) };
+        : { ...common, kind: "item", boxes: Number(f.get("boxes")), weight: f.get("weight") || null, standalone: f.has("standalone"), stock: Number(f.get("stock") || 0) };
       try {
         await api(p ? `/api/products/${p.id}` : "/api/products", { method: p ? "PUT" : "POST", body: payload });
         await refreshProducts();
@@ -981,38 +983,153 @@ views.crm = async (page, tools) => {
 };
 
 // ---------- logistics: what leaves the warehouse and when ----------
+// ---------- logistics: plan a day's routes ----------
+// Pick a day, tick that day's delivery orders, choose a driver and a vehicle: the server orders the
+// stops (morning window first, nearest next) and the driver works the route in the mini app.
+const ROUTE_STATUS = { planned: ["Rejada", ""], started: ["Yo'lda", "teal"], done: ["Tugadi", "ok"] };
+const kg = (n) => `${Math.round(n * 10) / 10} kg`;
+let logisticsDate = null;
+
+function routeLoad(stops) {
+  return {
+    boxes: stops.reduce((n, o) => n + o.boxes, 0),
+    weight: stops.reduce((n, o) => n + (o.weight ?? 0), 0),
+    unknown: stops.filter((o) => o.weight === null).length,
+  };
+}
+
+function capacityNote(load, vehicle) {
+  if (!vehicle) return "";
+  const over = [];
+  if (vehicle.capacityKg && load.weight > vehicle.capacityKg) over.push(`og'irlik ${kg(load.weight)} > ${kg(vehicle.capacityKg)}`);
+  if (vehicle.capacityBoxes && load.boxes > vehicle.capacityBoxes) over.push(`qutilar ${load.boxes} > ${vehicle.capacityBoxes}`);
+  return over.length ? `<p class="note">⚠️ Mashinaga sig'maydi: ${over.join(", ")}</p>` : "";
+}
+
+const stopLine = (o, i) =>
+  `<li data-order="${o.id}" style="cursor:pointer"><span>${i === undefined ? "" : `<b>${i + 1}.</b> `}<b>${no(o)}</b> ${esc(o.name)} · ${esc((o.deliveryLabel || "").split(", ").at(-1))}<br><span class="muted">${esc(o.address || "manzil yo'q")}${o.location ? "" : " · 📍 lokatsiya yo'q"} · ${o.boxes} quti${o.weight ? ` · ${kg(o.weight)}` : ""}${o.toCollect ? ` · naqd ${sum(o.toCollect)}` : ""}</span></span><span>${o.handedAt ? pill(["Topshirildi", "ok"]) : pill(orderState(o))}</span></li>`;
+
 views.logistics = async (page, tools) => {
-  const active = (await ordersFor(90)).filter((o) => o.orderType === "delivery" && ["picking", "ready", "shipped"].includes(o.stage) && o.status !== "cancelled");
-  const slotDay = (o) => (o.deliverySlot ?? "").slice(0, 10);
-  const days = [...new Set(active.map(slotDay).filter(Boolean))].sort();
-  const waiting = active.filter((o) => o.stage === "ready" && !o.deliveryLabel);
-  const card = (o) => `<li data-order="${o.id}" style="cursor:pointer"><span><b>${no(o)}</b> ${esc(o.name)} · ${esc(o.phone)}<br><span class="muted">${esc(o.lines.map((l) => `${l.name} × ${l.qty}`).join(", "))}</span></span><span>${pill(orderState(o))}</span></li>`;
-  tools.innerHTML = "";
+  const days = Array.from({ length: 8 }, (_, i) => dayKey(Date.now() + i * DAY));
+  logisticsDate ??= days[0];
+  tools.innerHTML = `<div class="seg">${days.map((d, i) => `<button type="button" data-day="${d}" class="${d === logisticsDate ? "on" : ""}">${i === 0 ? "Bugun" : i === 1 ? "Ertaga" : d.slice(5).split("-").reverse().join(".")}</button>`).join("")}</div>`;
+  tools.onclick = (e) => {
+    const b = e.target.closest("[data-day]");
+    if (!b) return;
+    logisticsDate = b.dataset.day;
+    render();
+  };
+  const plan = await api(`/api/logistics?date=${logisticsDate}`);
+  const free = plan.orders.filter((o) => !o.routeId && ["new", "picking", "ready"].includes(o.stage));
+  const vehicles = plan.vehicles.filter((v) => v.active !== false);
+  const byOrder = new Map(plan.orders.map((o) => [o.id, o]));
+  const routeCard = (r) => {
+    const stops = r.orderIds.map((id) => byOrder.get(id)).filter(Boolean);
+    const load = routeLoad(stops);
+    const pts = stops.filter((o) => o.location).map((o) => `${o.location.lat},${o.location.lon}`);
+    const origin = plan.warehouse ? `${plan.warehouse.lat},${plan.warehouse.lon}` : pts.shift();
+    const map = pts.length ? `https://www.google.com/maps/dir/${[origin, ...pts].filter(Boolean).join("/")}` : null;
+    return `<div class="card"><h3>🚚 ${esc(r.driverName)} · ${esc(r.vehicleName)} ${pill(ROUTE_STATUS[r.status])}</h3>
+      <p class="muted">${stops.length} ta manzil · ${load.boxes} quti · ${kg(load.weight)}${load.unknown ? ` (${load.unknown} tasida og'irlik yo'q)` : ""}${r.km ? ` · ~${r.km} km` : ""}</p>
+      ${capacityNote(load, plan.vehicles.find((v) => v.id === r.vehicleId))}
+      <ul class="list">${stops.map(stopLine).join("")}</ul>
+      <div class="stack" style="margin-top:10px">${map ? `<a class="btn btn--ghost" target="_blank" rel="noopener" href="${esc(map)}">🗺 Xaritada marshrut</a>` : ""}${r.status === "planned" ? `<button class="btn btn--ghost" type="button" data-drop="${r.id}">Reysni bekor qilish</button>` : ""}</div></div>`;
+  };
   page.innerHTML = `
     <div class="grid cols-4">
-      <div class="card kpi"><small>Yetkazish kutilmoqda</small><b>${active.filter((o) => o.stage !== "shipped").length}</b><span>terilmoqda yoki tayyor</span></div>
-      <div class="card kpi"><small>Vaqt tanlanmagan</small><b>${waiting.length}</b><span>mijozga eslatma boradi</span></div>
-      <div class="card kpi"><small>Yo'lda</small><b>${active.filter((o) => o.stage === "shipped").length}</b><span>&nbsp;</span></div>
-      <div class="card kpi"><small>Rejalashtirilgan kunlar</small><b>${days.length}</b><span>&nbsp;</span></div>
+      <div class="card kpi"><small>${esc(plan.dateLabel)}: yetkazish</small><b>${plan.orders.length}</b><span>shu kunga vaqt tanlangan</span></div>
+      <div class="card kpi"><small>Reysga biriktirilmagan</small><b>${free.length}</b><span>${free.filter((o) => o.stage !== "ready").length} tasi hali omborda terilmoqda</span></div>
+      <div class="card kpi"><small>Reyslar</small><b>${plan.routes.length}</b><span>${plan.routes.filter((r) => r.status === "started").length} tasi yo'lda</span></div>
+      <div class="card kpi"><small>Haydovchi / mashina</small><b>${plan.drivers.length} / ${vehicles.length}</b><span>&nbsp;</span></div>
+    </div>
+    ${plan.warehouse ? "" : '<p class="note" style="margin-top:12px">⚠️ Ombor lokatsiyasi kiritilmagan: marshrut tartibi va km taxminiy. Sozlamalar → Yetkazish narxlari.</p>'}
+    <div class="grid cols-2" style="margin-top:16px">
+      <div class="card"><h3>📦 Reys tuzish</h3>
+        ${
+          free.length
+            ? `<ul class="list" id="freeList">${free.map((o) => `<li><label class="check" style="flex:1"><input type="checkbox" data-pick="${o.id}" checked /> <span><b>${no(o)}</b> ${esc(o.name)} · ${esc((o.deliveryLabel || "").split(", ").at(-1))}<br><span class="muted">${esc(o.address || "")} · ${o.boxes} quti${o.weight ? ` · ${kg(o.weight)}` : ""}</span></span></label>${pill(orderState(o))}</li>`).join("")}</ul>
+               <div class="row2" style="margin-top:12px">
+                 <label class="field">Haydovchi<select id="rDriver">${plan.drivers.map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join("")}</select></label>
+                 <label class="field">Mashina<select id="rVehicle">${vehicles.map((v) => `<option value="${v.id}">${esc([v.name, v.plate].filter(Boolean).join(" · "))}</option>`).join("")}</select></label>
+               </div>
+               <p class="muted" id="rLoad"></p>
+               ${plan.drivers.length && vehicles.length ? '<button class="btn" type="button" id="makeRoute">Reys yaratish</button>' : `<p class="note">${plan.drivers.length ? "" : "Haydovchi yo'q: Xodimlar (HR) → ＋ Haydovchini taklif qilish. "}${vehicles.length ? "" : "Mashina yo'q: pastda ＋ Mashina."}</p>`}`
+            : '<p class="empty">Bu kun uchun biriktiriladigan buyurtma yo\'q</p>'
+        }
+      </div>
+      ${plan.routes.map(routeCard).join("")}
     </div>
     <div class="grid cols-2" style="margin-top:16px">
-      ${days
-        .map((d) => {
-          const list = active.filter((o) => slotDay(o) === d);
-          const windows = [...new Set(list.map((o) => o.deliveryLabel.split(", ").at(-1)))].sort();
-          return `<div class="card"><h3>🗓 ${esc(list[0].deliveryLabel.split(", ").slice(0, 2).join(", "))} · ${list.length} ta</h3>${windows
-            .map((w) => `<p class="muted" style="margin:8px 0 2px">${w}</p><ul class="list">${list.filter((o) => o.deliveryLabel.endsWith(w)).map(card).join("")}</ul>`)
-            .join("")}</div>`;
-        })
-        .join("") || '<div class="card"><p class="empty">Rejalashtirilgan yetkazish yo\'q</p></div>'}
-      <div class="card"><h3>⏳ Tayyor, vaqt tanlanmagan</h3><ul class="list">${waiting.map(card).join("") || '<li class="muted">Yo\'q</li>'}</ul></div>
-    </div>
-    <p class="muted" style="margin-top:10px">Mashinalar, haydovchilar, og'irlik bo'yicha biriktirish va xaritada marshrut logistika modulining keyingi bosqichida qo'shiladi (TZ: 3-bosqich).</p>`;
-  page.onclick = (e) => {
+      <div class="card"><h3>🚐 Mashinalar</h3><ul class="list">${
+        plan.vehicles.map((v) => `<li data-vehicle="${v.id}" style="cursor:pointer"><span><b>${esc(v.name)}</b> ${esc(v.plate)}<br><span class="muted">${v.capacityKg ? kg(v.capacityKg) : "sig'imi kiritilmagan"}${v.capacityBoxes ? ` · ${v.capacityBoxes} quti` : ""}</span></span>${v.active === false ? pill(["O'chirilgan", ""]) : pill(["Faol", "ok"])}</li>`).join("") || '<li class="muted">Hali mashina yo\'q</li>'
+      }</ul><button class="btn btn--ghost" type="button" id="newVehicle" style="margin-top:10px">＋ Mashina</button></div>
+      <div class="card"><h3>👷 Haydovchilar</h3><ul class="list">${plan.drivers.map((d) => `<li><span><b>${esc(d.name)}</b>${d.username ? ` <span class="muted">@${esc(d.username)}</span>` : ""}</span></li>`).join("") || '<li class="muted">Hali haydovchi yo\'q</li>'}</ul>
+        <p class="muted" style="margin-top:10px">Haydovchi qo'shish: Xodimlar (HR) → ＋ Haydovchini taklif qilish. Haydovchi reyslarini Telegram ilovada ☰ → 🚚 Reyslarim'da ko'radi.</p></div>
+    </div>`;
+  const picked = () => [...page.querySelectorAll("[data-pick]:checked")].map((x) => byOrder.get(x.dataset.pick));
+  const showLoad = () => {
+    const el = $("#rLoad");
+    if (!el) return;
+    const load = routeLoad(picked());
+    el.innerHTML = `Tanlandi: ${picked().length} ta · ${load.boxes} quti · ${kg(load.weight)}${load.unknown ? ` (${load.unknown} tasida og'irlik kiritilmagan)` : ""}${capacityNote(load, vehicles.find((v) => v.id === $("#rVehicle").value))}`;
+  };
+  showLoad();
+  page.onchange = showLoad;
+  page.onclick = async (e) => {
     const li = e.target.closest("[data-order]");
-    if (li) openOrder(li.dataset.order);
+    if (li) return openOrder(li.dataset.order);
+    const v = e.target.closest("[data-vehicle]");
+    if (v || e.target.closest("#newVehicle")) return vehicleForm(plan.vehicles.find((x) => x.id === v?.dataset.vehicle));
+    const drop = e.target.closest("[data-drop]");
+    const make = e.target.closest("#makeRoute");
+    if (drop && !window.confirm("Reys bekor qilinsinmi? Buyurtmalar yana biriktirilmaganlar ro'yxatiga qaytadi.")) return;
+    if (!drop && !make) return;
+    try {
+      if (drop) await api(`/api/routes/${drop.dataset.drop}`, { method: "DELETE" });
+      else await api("/api/routes", { method: "POST", body: { orderIds: picked().map((o) => o.id), driverId: $("#rDriver").value, vehicleId: $("#rVehicle").value } });
+      toast(drop ? "Reys bekor qilindi" : "Reys yaratildi, haydovchiga xabar ketdi");
+      dropOrders();
+      render();
+    } catch (err) {
+      toast(err.message);
+    }
   };
 };
+
+function vehicleForm(v) {
+  openDrawer(v ? "Mashina" : "Yangi mashina", (body) => {
+    body.innerHTML = `<form id="vForm">
+      <label class="field">Nomi / rusumi<input class="input" name="name" required value="${esc(v?.name)}" placeholder="Isuzu NPR, Labo, Damas" /></label>
+      <label class="field">Davlat raqami<input class="input" name="plate" value="${esc(v?.plate)}" placeholder="01 A 123 BC" /></label>
+      <div class="row2">
+        <label class="field">Yuk ko'tarish, kg<input class="input" name="capacityKg" type="number" min="1" value="${v?.capacityKg ?? ""}" /></label>
+        <label class="field">Sig'imi, quti<input class="input" name="capacityBoxes" type="number" min="1" value="${v?.capacityBoxes ?? ""}" /></label>
+      </div>
+      <label class="check"><input type="checkbox" name="active" ${v?.active === false ? "" : "checked"} /> Faol (reysga tanlanadi)</label>
+      <div class="stack" style="margin-top:12px"><button class="btn" type="submit">Saqlash</button>${v ? '<button class="btn btn--ghost" type="button" id="vDel">O\'chirish</button>' : ""}</div>
+    </form>`;
+    $("#vForm").onsubmit = async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      try {
+        await api(v ? `/api/vehicles/${v.id}` : "/api/vehicles", { method: v ? "PUT" : "POST", body: { name: f.get("name"), plate: f.get("plate"), capacityKg: f.get("capacityKg"), capacityBoxes: f.get("capacityBoxes"), active: f.has("active") } });
+        toast("Saqlandi");
+        closeDrawer();
+        render();
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+    if (v) {
+      $("#vDel").onclick = async () => {
+        if (!window.confirm(`«${v.name}» o'chirilsinmi?`)) return;
+        await api(`/api/vehicles/${v.id}`, { method: "DELETE" }).catch((err) => toast(err.message));
+        closeDrawer();
+        render();
+      };
+    }
+  });
+}
 
 const BANNER_STYLE = { photo: "Rasm", dark: "Qora", teal: "Moviy" };
 
@@ -1111,24 +1228,26 @@ function bannerForm(b) {
 }
 
 views.staff = async (page, tools) => {
-  tools.innerHTML = '<button class="btn" type="button" id="invite">＋ Omborchini taklif qilish</button>';
+  tools.innerHTML = '<button class="btn" type="button" data-invite="warehouse">＋ Omborchini taklif qilish</button><button class="btn btn--dark" type="button" data-invite="driver">＋ Haydovchini taklif qilish</button>';
   const [staff, screens] = await Promise.all([api("/api/staff"), api("/api/screens")]);
   page.innerHTML = `
     <div class="grid cols-2">
       <div class="card"><h3>Xodimlar (${staff.length})</h3><ul class="list">${
-        staff.map((m) => `<li><span><b>${esc(m.name)}</b>${m.username ? ` <span class="muted">@${esc(m.username)}</span>` : ""}<br><span class="muted">Omborchi · qo'shilgan ${when(m.addedAt)}</span></span><button class="btn btn--ghost" data-remove="${m.id}" data-name="${esc(m.name)}">O'chirish</button></li>`).join("") ||
+        staff.map((m) => `<li><span><b>${esc(m.name)}</b>${m.username ? ` <span class="muted">@${esc(m.username)}</span>` : ""}<br><span class="muted">${m.role === "driver" ? "Haydovchi" : "Omborchi"} · qo'shilgan ${when(m.addedAt)}</span></span><button class="btn btn--ghost" data-remove="${m.id}" data-name="${esc(m.name)}">O'chirish</button></li>`).join("") ||
         '<li class="muted">Hali xodim yo\'q</li>'
       }</ul><p class="muted" style="margin-top:10px">Adminlar: ${state.info.admins} ta (deploy sozlamasida).</p></div>
       <div class="card"><h3>Ombor ekranlari (${screens.length})</h3><ul class="list">${
         screens.map((s) => `<li><span>🖥 ${esc(s.name)}<br><span class="muted">ulangan ${when(s.createdAt)}</span></span><button class="btn btn--ghost" data-unpair="${s.id}" data-name="${esc(s.name)}">Uzish</button></li>`).join("") || '<li class="muted">Ekran ulanmagan</li>'
       }</ul><p class="muted" style="margin-top:10px">Yangi ekran ulash: mini ilovada ☰ → 🖥 Ombor ekrani → Kod olish.</p></div>
     </div>
-    <div class="card" style="margin-top:16px"><h3>HR moduli: keyingi bosqich</h3><p class="muted">Lavozimlar (operator, haydovchi, usta, buxgalter), ishga qabul, davomat, maosh hisobi va ustalar platformasi (tekshiruv, reyting, daromad, bonus) TZ bo'yicha keyingi bosqichlarda shu bo'limga qo'shiladi.</p></div>`;
-  $("#invite").onclick = async () => {
+    <div class="card" style="margin-top:16px"><h3>HR moduli: keyingi bosqich</h3><p class="muted">Lavozimlar (operator, usta, buxgalter), ishga qabul, davomat, maosh hisobi va ustalar platformasi (tekshiruv, reyting, daromad, bonus) TZ bo'yicha keyingi bosqichlarda shu bo'limga qo'shiladi.</p></div>`;
+  tools.onclick = async (e) => {
+    const role = e.target.closest("[data-invite]")?.dataset.invite;
+    if (!role) return;
     try {
-      const { link, expiresAt } = await api("/api/staff/invites", { method: "POST" });
+      const { link, expiresAt } = await api("/api/staff/invites", { method: "POST", body: { role } });
       openDrawer("Taklif havolasi", (body) => {
-        body.innerHTML = `<p>Havolani omborchiga yuboring. U Telegram'da bosib <b>Start</b> ni bossa, avtomatik qo'shiladi.</p>
+        body.innerHTML = `<p>Havolani ${role === "driver" ? "haydovchiga" : "omborchiga"} yuboring. U Telegram'da bosib <b>Start</b> ni bossa, avtomatik qo'shiladi.</p>
           <p class="note" style="word-break:break-all">${esc(link)}</p><p class="muted">${when(expiresAt)} gacha, bir marta ishlaydi.</p>
           <button class="btn" id="copyLink">Nusxa olish</button>`;
         $("#copyLink", body).onclick = () => navigator.clipboard.writeText(link).then(() => toast("Nusxa olindi"), () => toast("Nusxa olib bo'lmadi, qo'lda belgilang"));

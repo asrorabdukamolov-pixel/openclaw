@@ -178,6 +178,26 @@ Xodimlar, Sozlamalar (yetkazish narxlari, ombor lokatsiyasi).
 10 daqiqa va bir marta ishlaydi; brauzer 30 kun eslab qoladi. Admin `ADMIN_IDS` dan olib tashlansa, sessiyasi ham yopiladi.
 "Chiqish" tugmasi sessiyani o'chiradi.
 
+## Logistika: mashinalar, haydovchilar, reyslar
+
+Panel → **Logistika**:
+
+1. **🚐 Mashinalar** → **＋ Mashina**: nomi, davlat raqami, yuk ko'tarish (kg) va sig'imi (quti).
+2. **Haydovchi qo'shish**: Xodimlar (HR) → **＋ Haydovchini taklif qilish** → havolani haydovchiga yuboring, u botda **Start** ni bosadi.
+3. Yuqoridan **kunni** tanlang (Bugun, Ertaga, …). O'sha kunga yetkazish vaqtini tanlagan buyurtmalar chiqadi.
+4. **Reys tuzish**: buyurtmalarni belgilang, haydovchi va mashinani tanlang → **Reys yaratish**.
+   Tizim manzillarni tartiblaydi: avval 10:00–13:00 oynasi, keyin 14:00–18:00; har oyna ichida ombordan eng yaqinidan.
+   Og'irlik yoki qutilar mashinaga sig'masa, ogohlantiradi. Haydovchiga bot xabar yuboradi.
+
+Haydovchi Telegram ilovada **☰ → 🚚 Reyslarim**:
+- manzillar tartib bilan: mijoz, telefon (bosib qo'ng'iroq), manzil, qavat/lift, qutilar, olinadigan naqd pul;
+- **📍 Xarita** va **🗺 Butun marshrut** — Google Maps'da yo'l;
+- **▶️ Reysni boshlash** — mebel mashinaga yuklangach; hamma buyurtma omborda "Tayyor" bo'lishi kerak. Mijozlarga "yo'lga chiqdi" xabari boradi;
+- har manzilda **🤝 Topshirdim** — mijozga "Qabul qildim / Muammo bor" tugmalari qayta boradi. Mijoz 24 soat ichida javob bermasa, buyurtma avtomatik yopiladi.
+- Oxirgi manzil topshirilgach, reys "Tugadi" bo'ladi va buyurtmalar guruhiga haydovchidagi naqd summa yoziladi.
+
+Mahsulot og'irligi (kg) mahsulot formasida yoki Excel'dagi "Og'irligi, kg" ustunida kiritiladi; komplekt og'irligi modullardan hisoblanadi.
+
 ## Buyurtmalar arxivi va bekor qilish
 
 - **Mijoz**: ☰ → **🧾 Mening buyurtmalarim** — holati, tarixi, "Qayta buyurtma berish".

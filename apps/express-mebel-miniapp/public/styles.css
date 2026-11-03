@@ -1218,3 +1218,75 @@ select {
 .quote .total {
   margin-top: 4px;
 }
+
+/* Driver routes: one card per route, stops in driving order. */
+.route {
+  margin: 0 0 18px;
+  padding: 14px;
+  border-radius: var(--radius);
+  background: var(--card);
+}
+
+.route-head,
+.stop-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.route-head b {
+  flex: 1;
+  font-size: 17px;
+}
+
+.stop {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 16px;
+  background: var(--white);
+}
+
+.stop p {
+  margin: 6px 0;
+}
+
+.stop-head b {
+  flex: 1;
+}
+
+.stop-head small {
+  color: var(--muted);
+}
+
+.stop-no {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--teal);
+  color: var(--white);
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.stop--done {
+  opacity: 0.55;
+}
+
+.stop-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.stop-acts .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 auto;
+  width: auto;
+  text-decoration: none;
+  text-align: center;
+}

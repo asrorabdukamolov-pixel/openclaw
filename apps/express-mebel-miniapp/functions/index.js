@@ -38,6 +38,8 @@ const screensCol = db.collection("screens");
 const pairingsCol = db.collection("screenPairings");
 const adminLoginsCol = db.collection("adminLogins");
 const adminSessionsCol = db.collection("adminSessions");
+const vehiclesCol = db.collection("vehicles");
+const routesCol = db.collection("routes");
 const countersRef = db.collection("meta").doc("counters");
 const deliveryRef = db.collection("meta").doc("delivery");
 const segmentsRef = db.collection("meta").doc("segments");
@@ -125,6 +127,13 @@ function cleanKitParts(raw) {
   return [...qtyById].map(([id, qty]) => ({ id, qty }));
 }
 
+function cleanWeight(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const kg = Math.round(Number(value) * 10) / 10;
+  if (!(kg > 0 && kg <= 5000)) throw new HttpError(400, "Og'irlik noto'g'ri (kg)");
+  return kg;
+}
+
 function cleanProduct(input, existing = {}) {
   // The kind is chosen once, at creation; products saved before kits existed are items.
   const kind = existing.createdAt ? (existing.kind ?? "item") : input.kind === "kit" ? "kit" : "item";
@@ -177,6 +186,8 @@ function cleanProduct(input, existing = {}) {
     standalone: Boolean(input.standalone ?? existing.standalone ?? true),
     // Packages per unit: each box gets its own barcode label and is scanned when picking.
     boxes: Math.min(20, Math.max(1, Math.round(Number(input.boxes ?? existing.boxes ?? 1)) || 1)),
+    // Packed weight per unit, kg; logistics sums it against the vehicle's load limit. Optional.
+    weight: cleanWeight(input.weight === undefined ? existing.weight : input.weight),
     sku: existing.sku ?? null,
     // Stock changes only through the warehouse journal; new products start at 0.
     stock: existing.stock ?? 0,
@@ -459,6 +470,7 @@ function withKitStock(kit, byId) {
     ...kit,
     stock,
     boxes: missing ? null : parts.reduce((n, c) => n + c.qty * (c.product.boxes ?? 1), 0),
+    weight: missing || parts.some((c) => !c.product.weight) ? null : Math.round(parts.reduce((n, c) => n + c.qty * c.product.weight, 0) * 10) / 10,
     parts: parts.map((c) => ({
       id: c.id,
       qty: c.qty,
@@ -507,6 +519,7 @@ const IMPORT_FIELDS = {
   price: "narx",
   oldPrice: "eski narx",
   boxes: "qutilar",
+  weight: "og'irlik",
   size: "o'lcham",
   material: "material",
   description: "tavsif",
@@ -592,7 +605,7 @@ async function importProducts(rows, { apply, actor }) {
     try {
       for (const [field, label] of Object.entries(IMPORT_FIELDS)) {
         const v = raw[field];
-        if (["price", "oldPrice", "boxes", "leadDays"].includes(field)) input[field] = importNumber(v, label);
+        if (["price", "oldPrice", "boxes", "weight", "leadDays"].includes(field)) input[field] = importNumber(v, label);
         else if (["standalone", "isNew", "draft"].includes(field)) input[field] = importFlag(v, label);
         else if (field === "category") input[field] = blank(v) ? undefined : importCategory(v);
         else if (field === "whenShort") input[field] = blank(v) ? undefined : /yash|hide/i.test(String(v)) ? "hide" : "preorder";
@@ -644,7 +657,7 @@ async function importProducts(rows, { apply, actor }) {
         const before = base[field] ?? null;
         const after = r.next[field] ?? null;
         if (r.kind === "item" && ["whenShort", "leadDays"].includes(field)) continue;
-        if (r.kind === "kit" && ["boxes", "standalone"].includes(field)) continue;
+        if (r.kind === "kit" && ["boxes", "weight", "standalone"].includes(field)) continue;
         if (JSON.stringify(before) !== JSON.stringify(after)) r.changes.push(`${label}: ${show(before)} → ${show(after)}`);
       }
       if (r.kind === "kit" && JSON.stringify(r.existing.components) !== JSON.stringify(r.next.components)) r.changes.push("komplekt tarkibi");
@@ -772,7 +785,8 @@ async function redeemAdminLogin(code) {
   return { token, name: session.name, expiresAt: session.expiresAt };
 }
 
-const ROLE_LABEL = { warehouse: "omborchi" };
+const ROLE_LABEL = { warehouse: "omborchi", driver: "haydovchi" };
+const ROLE_HOME = { warehouse: "☰ → 📦 Ombor", driver: "☰ → 🚚 Reyslarim" };
 const INVITE_TTL_MS = 24 * 60 * 60 * 1000;
 
 // Redeems a one-time invite: the Telegram account that opens it becomes staff with the invite's role.
@@ -804,7 +818,7 @@ async function joinStaff(from, code) {
     text: `✅ ${staffName(from)}${from.username ? ` (@${from.username})` : ""} ${ROLE_LABEL[result.role]} sifatida qo'shildi.`,
   }).catch((err) => logger.warn("invite notice failed", err));
   return {
-    text: `✅ Siz Express Market'ga <b>${ROLE_LABEL[result.role]}</b> sifatida qo'shildingiz.\n\nIlovani oching → ☰ → 📦 Ombor.`,
+    text: `✅ Siz Express Market'ga <b>${ROLE_LABEL[result.role]}</b> sifatida qo'shildingiz.\n\nIlovani oching → ${ROLE_HOME[result.role]}.`,
     reply_markup: openApp,
   };
 }
@@ -920,7 +934,7 @@ async function handleOrder(req, res) {
         kind: l.product.kind === "kit" ? "kit" : "item",
       })),
       // ... and what the warehouse picks: physical modules with their boxes, kits expanded and merged.
-      pick: pick.map((m) => ({ id: m.ref.id, name: m.product.name, qty: m.qty, sku: m.product.sku ?? null, boxes: m.product.boxes ?? 1 })),
+      pick: pick.map((m) => ({ id: m.ref.id, name: m.product.name, qty: m.qty, sku: m.product.sku ?? null, boxes: m.product.boxes ?? 1, weight: m.product.weight ?? null })),
       goodsTotal: lines.reduce((n, l) => n + l.product.price * l.qty, 0),
       delivery,
       total: lines.reduce((n, l) => n + l.product.price * l.qty, 0) + (delivery?.total ?? 0),
@@ -1151,6 +1165,8 @@ async function handleSuccessfulPayment(msg) {
 
 const ACTIVE_STAGES = ["new", "picking", "ready", "shipped"];
 const AUTO_CLOSE_MS = 5 * 24 * 60 * 60 * 1000;
+// Once the driver marks the hand-over, a buyer who stays silent has a day to report a problem.
+const HANDED_CLOSE_MS = 24 * 60 * 60 * 1000;
 const boxCode = (sku, box) => `EM${sku}-${box}`;
 const boxesNeeded = (order) => pickLines(order).reduce((n, i) => n + i.qty * (i.boxes ?? 1), 0);
 const boxesPicked = (order) => Object.values(order.picked || {}).reduce((n, c) => n + c, 0);
@@ -1227,6 +1243,8 @@ function orderSummary(id, o) {
     deliveryLabel: o.deliveryLabel ?? null,
     cancelRequest: o.cancelRequest ?? null,
     refund: o.refund ?? null,
+    routeId: o.routeId ?? null,
+    handedAt: o.handedAt ?? null,
   };
 }
 
@@ -1239,6 +1257,7 @@ function orderDetail(id, o) {
     ["readyAt", "Tayyor"],
     ["slotChosenAt", `Yetkazish vaqti tanlandi${o.deliveryLabel ? `: ${o.deliveryLabel}` : ""}`],
     ["shippedAt", `Jo'natildi${o.shippedBy ? ` · ${o.shippedBy}` : ""}`],
+    ["handedAt", `Haydovchi topshirdi${o.handedBy ? ` · ${o.handedBy}` : ""}`],
     ["deliveredAt", o.autoClosed ? "Avtomatik yopildi" : "Mijoz qabul qildi"],
     ["problemAt", "Mijoz muammo bildirdi"],
     ["cancelledAt", `Bekor qilindi${o.cancelledBy ? ` · ${o.cancelledBy}` : ""}${o.cancelReason ? `: ${o.cancelReason}` : ""}`],
@@ -1793,6 +1812,303 @@ async function handleFulfillment(req, res, path, method) {
   return null;
 }
 
+// ---------- logistics: vehicles, drivers and routes ----------
+// A route ("reys") is one driver in one vehicle taking a day's delivery orders out of the warehouse.
+// Stops follow the windows buyers chose (morning first), nearest-next inside each window. Drivers
+// work from the mini app: start the route (orders go "shipped"), then mark each hand-over.
+
+const ROUTE_MAX_STOPS = 40;
+const ROUTE_ORDER = { started: 0, planned: 1, done: 2 };
+const todayKey = () => new Date(Date.now() + TZ_OFFSET_MS).toISOString().slice(0, 10);
+const slotDate = (o) => String(o.deliverySlot || "").slice(0, 10);
+const slotHour = (o) => Number(String(o.deliverySlot || "").split("_")[1]) || 99;
+
+function cleanVehicle(input) {
+  const name = String(input.name || "").trim().slice(0, 60);
+  if (!name) throw new HttpError(400, "Mashina nomini kiriting");
+  const limit = (v, max, label) => {
+    if (v === "" || v === null || v === undefined) return null;
+    const n = Math.round(Number(v));
+    if (!(n > 0 && n <= max)) throw new HttpError(400, `${label} noto'g'ri`);
+    return n;
+  };
+  return {
+    name,
+    plate: String(input.plate || "").trim().toUpperCase().slice(0, 20),
+    capacityKg: limit(input.capacityKg, 50000, "Yuk ko'tarish (kg)"),
+    capacityBoxes: limit(input.capacityBoxes, 2000, "Quti sig'imi"),
+    active: input.active !== false,
+    updatedAt: Date.now(),
+  };
+}
+
+// Load of one order: boxes always known; weight only when every module has one (older orders
+// fall back to the product's current weight).
+function loadOf(o, weightById) {
+  const lines = pickLines(o);
+  const weights = lines.map((l) => l.weight ?? weightById.get(l.id) ?? null);
+  const weight = weights.every(Boolean) ? Math.round(lines.reduce((n, l, i) => n + l.qty * weights[i], 0) * 10) / 10 : null;
+  return { boxes: boxesNeeded(o), weight };
+}
+
+function orderStops(start, orders) {
+  const out = [];
+  let here = start;
+  for (const hour of [...new Set(orders.map(slotHour))].sort((a, b) => a - b)) {
+    const left = orders.filter((o) => slotHour(o) === hour);
+    while (left.length) {
+      let best = 0;
+      left.forEach((o, i) => {
+        const cur = left[best];
+        if (o.location && (!cur.location || (here && distanceKm(here, o.location) < distanceKm(here, cur.location)))) best = i;
+      });
+      const [next] = left.splice(best, 1);
+      out.push(next);
+      if (next.location) here = next.location;
+    }
+  }
+  return out;
+}
+
+function routeKm(start, stops) {
+  let here = start;
+  let km = 0;
+  for (const o of stops) {
+    if (here && o.location) km += distanceKm(here, o.location);
+    if (o.location) here = o.location;
+  }
+  return Math.round(km * 10) / 10;
+}
+
+function stopView(id, o, weightById) {
+  return {
+    id,
+    number: o.number ?? null,
+    name: o.name,
+    phone: o.phone,
+    address: o.address,
+    comment: o.comment,
+    location: o.location ?? null,
+    stage: o.stage,
+    status: o.status,
+    deliverySlot: o.deliverySlot ?? null,
+    deliveryLabel: o.deliveryLabel ?? null,
+    payment: o.payment,
+    toCollect: o.payment === "cash" ? o.total : 0,
+    floor: o.delivery?.floor ?? null,
+    lift: o.delivery?.lift ?? null,
+    lines: o.items.map((i) => `${i.name} × ${i.qty}`),
+    routeId: o.routeId ?? null,
+    handedAt: o.handedAt ?? null,
+    ...loadOf(o, weightById),
+  };
+}
+
+const productWeights = async () => new Map((await productsCol.get()).docs.map((d) => [d.id, d.data().weight ?? null]));
+
+async function requireDriver(req) {
+  const auth = await authenticate(req);
+  if (auth.role !== "driver") throw new HttpError(403, "Bu bo'lim faqat haydovchilar uchun");
+  return auth;
+}
+
+async function driverRoutes(user) {
+  const today = todayKey();
+  const snap = await routesCol.where("driverId", "==", String(user.id)).get();
+  const routes = snap.docs
+    .map((d) => ({ id: d.id, ...d.data() }))
+    .filter((r) => r.date >= today || r.status === "started")
+    // Work first: a route on the road, then planned ones by day; finished ones sink to the bottom.
+    .sort((a, b) => ROUTE_ORDER[a.status] - ROUTE_ORDER[b.status] || a.date.localeCompare(b.date))
+    .slice(0, 10);
+  const ids = routes.flatMap((r) => r.orderIds);
+  const snaps = ids.length ? await db.getAll(...ids.map((id) => ordersCol.doc(id))) : [];
+  const byId = new Map(snaps.filter((x) => x.exists).map((x) => [x.id, x.data()]));
+  const weights = await productWeights();
+  return routes.map((r) => ({
+    ...r,
+    dateLabel: dayLabel(new Date(`${r.date}T00:00:00Z`)),
+    stops: r.orderIds.filter((id) => byId.has(id)).map((id) => stopView(id, byId.get(id), weights)),
+  }));
+}
+
+async function startRoute(id, user) {
+  const route = (await routesCol.doc(id).get()).data();
+  if (!route || route.driverId !== String(user.id)) throw new HttpError(404, "Reys topilmadi");
+  if (route.status !== "planned") return;
+  const orders = (await db.getAll(...route.orderIds.map((oid) => ordersCol.doc(oid)))).map((x) => ({ id: x.id, ...x.data() }));
+  const waiting = orders.filter((o) => o.stage !== "ready" && o.stage !== "shipped" && o.status !== "cancelled");
+  if (waiting.length) throw new HttpError(409, `Omborda hali tayyor emas: ${waiting.map(ORDER_LABEL).join(", ")}. Omborchiga ayting`);
+  for (const o of orders.filter((x) => x.stage === "ready")) await setStage(o.id, ["ready"], "shipped", { shippedBy: `🚚 ${staffName(user)}` });
+  await routesCol.doc(id).update({ status: "started", startedAt: Date.now() });
+}
+
+async function handOver(orderId, user) {
+  const ref = ordersCol.doc(orderId);
+  const o = (await ref.get()).data();
+  const route = o?.routeId ? (await routesCol.doc(o.routeId).get()).data() : null;
+  if (!o || !route || route.driverId !== String(user.id)) throw new HttpError(404, "Buyurtma sizning reysingizda emas");
+  if (o.stage !== "shipped") throw new HttpError(409, o.stage === "delivered" ? "Mijoz allaqachon qabul qilgan" : "Avval reysni boshlang");
+  if (o.handedAt) return;
+  await ref.update({ handedAt: Date.now(), handedBy: staffName(user), cashCollected: o.payment === "cash" });
+  if (o.telegramUserId) {
+    await tg("sendMessage", {
+      chat_id: o.telegramUserId,
+      text: `🤝 Haydovchi buyurtmangiz ${ORDER_LABEL(o)} ni topshirdi. Hammasi joyidami?`,
+      reply_markup: { inline_keyboard: [[{ text: "✅ Qabul qildim", callback_data: `acc:${orderId}` }], [{ text: "⚠️ Muammo bor", callback_data: `prob:${orderId}` }]] },
+    }).catch((err) => logger.warn("handover notice failed", err));
+  }
+  const routeRef = routesCol.doc(o.routeId);
+  const stops = (await db.getAll(...route.orderIds.map((oid) => ordersCol.doc(oid)))).map((x) => x.data());
+  const open = stops.filter((x) => x && x.status !== "cancelled" && !x.handedAt && x.stage !== "delivered");
+  if (open.length) return;
+  await routeRef.update({ status: "done", finishedAt: Date.now() });
+  const cash = stops.filter((x) => x?.payment === "cash" && x.status !== "cancelled").reduce((n, x) => n + x.total, 0);
+  await tg("sendMessage", {
+    chat_id: ordersChat(),
+    text: `✅ Reys tugadi: ${route.driverName}, ${route.vehicleName}, ${route.orderIds.length} ta manzil.${cash ? `\n💵 Naqd: ${cash.toLocaleString("ru-RU")} so'm — kassaga topshirish kerak.` : ""}`,
+  }).catch((err) => logger.warn("route done notice failed", err));
+}
+
+async function handleLogistics(req, res, path, method) {
+  if (path === "/api/vehicles" && method === "GET") {
+    await requireRole(req, "admin");
+    const snap = await vehiclesCol.get();
+    return res.json(snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => a.name.localeCompare(b.name)));
+  }
+  if (path === "/api/vehicles" && method === "POST") {
+    await requireRole(req, "admin");
+    const ref = vehiclesCol.doc();
+    const data = { ...cleanVehicle(req.body || {}), createdAt: Date.now() };
+    await ref.set(data);
+    return res.status(201).json({ id: ref.id, ...data });
+  }
+  const vehicleMatch = path.match(/^\/api\/vehicles\/([\w-]{1,64})$/);
+  if (vehicleMatch && (method === "PUT" || method === "DELETE")) {
+    await requireRole(req, "admin");
+    const ref = vehiclesCol.doc(vehicleMatch[1]);
+    if (method === "DELETE") {
+      await ref.delete();
+      return res.json({ ok: true });
+    }
+    const data = cleanVehicle(req.body || {});
+    await ref.update(data);
+    return res.json({ id: ref.id, ...data });
+  }
+
+  if (path === "/api/logistics" && method === "GET") {
+    await requireRole(req, "admin");
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.date)) ? String(req.query.date) : todayKey();
+    const [orderSnap, routeSnap, vehicleSnap, driverSnap, weights, settings] = await Promise.all([
+      ordersCol.where("deliverySlot", ">=", `${date}_`).where("deliverySlot", "<", `${date}_~`).get(),
+      routesCol.where("date", "==", date).get(),
+      vehiclesCol.get(),
+      staffCol.where("role", "==", "driver").get(),
+      productWeights(),
+      deliverySettings(),
+    ]);
+    const orders = orderSnap.docs
+      .map((d) => stopView(d.id, d.data(), weights))
+      .filter((o) => o.status !== "cancelled" && o.stage !== null)
+      .sort((a, b) => a.deliverySlot.localeCompare(b.deliverySlot));
+    return res.json({
+      date,
+      dateLabel: dayLabel(new Date(`${date}T00:00:00Z`)),
+      warehouse: settings.warehouse,
+      orders,
+      routes: routeSnap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => a.createdAt - b.createdAt),
+      vehicles: vehicleSnap.docs.map((d) => ({ id: d.id, ...d.data() })),
+      drivers: driverSnap.docs.map((d) => ({ id: d.id, name: d.data().name, username: d.data().username })),
+    });
+  }
+
+  if (path === "/api/routes" && method === "POST") {
+    const { user } = await requireRole(req, "admin");
+    const body = req.body || {};
+    const ids = [...new Set((Array.isArray(body.orderIds) ? body.orderIds : []).map(String))].filter((id) => /^[\w-]{1,64}$/.test(id));
+    if (!ids.length) throw new HttpError(400, "Reysga kamida bitta buyurtma tanlang");
+    if (ids.length > ROUTE_MAX_STOPS) throw new HttpError(400, `Bitta reysda ${ROUTE_MAX_STOPS} tadan ko'p manzil bo'lmasin`);
+    const settings = await deliverySettings();
+    const ref = routesCol.doc();
+    const route = await db.runTransaction(async (t) => {
+      const [vehicle, driver, ...snaps] = await t.getAll(
+        vehiclesCol.doc(String(body.vehicleId || "-")),
+        staffCol.doc(String(body.driverId || "-")),
+        ...ids.map((id) => ordersCol.doc(id)),
+      );
+      if (!vehicle.exists || vehicle.data().active === false) throw new HttpError(400, "Mashinani tanlang");
+      if (!driver.exists || driver.data().role !== "driver") throw new HttpError(400, "Haydovchini tanlang");
+      const orders = snaps.map((x) => {
+        if (!x.exists) throw new HttpError(404, "Buyurtma topilmadi");
+        return { id: x.id, ...x.data() };
+      });
+      const date = slotDate(orders[0]);
+      for (const o of orders) {
+        if (o.orderType !== "delivery" || o.status === "cancelled" || !["new", "picking", "ready"].includes(o.stage)) {
+          throw new HttpError(409, `${ORDER_LABEL(o)} ni reysga qo'shib bo'lmaydi: u yo'lda yoki yopilgan`);
+        }
+        if (!date || slotDate(o) !== date) throw new HttpError(400, "Reysdagi hamma buyurtma bitta kunga tegishli bo'lsin");
+        if (o.routeId) throw new HttpError(409, `${ORDER_LABEL(o)} boshqa reysda bor`);
+      }
+      const stops = orderStops(settings.warehouse, orders);
+      const v = vehicle.data();
+      const data = {
+        date,
+        driverId: driver.id,
+        driverName: driver.data().name,
+        vehicleId: vehicle.id,
+        vehicleName: [v.name, v.plate].filter(Boolean).join(" · "),
+        orderIds: stops.map((o) => o.id),
+        km: routeKm(settings.warehouse, stops),
+        status: "planned",
+        createdAt: Date.now(),
+        createdBy: staffName(user),
+      };
+      t.set(ref, data);
+      for (const o of orders) t.update(ordersCol.doc(o.id), { routeId: ref.id });
+      return data;
+    });
+    await tg("sendMessage", {
+      chat_id: route.driverId,
+      text: `🚚 Sizga yangi reys: ${dayLabel(new Date(`${route.date}T00:00:00Z`))}, ${route.orderIds.length} ta manzil, ${route.vehicleName}.\nIlovada ☰ → 🚚 Reyslarim.`,
+      reply_markup: { inline_keyboard: [[{ text: "🚚 Reyslarim", web_app: { url: `${WEBAPP_URL}/#reys` } }]] },
+    }).catch((err) => logger.warn("route notice failed", err));
+    return res.status(201).json({ id: ref.id, ...route });
+  }
+  const routeMatch = path.match(/^\/api\/routes\/([\w-]{1,64})$/);
+  if (routeMatch && method === "DELETE") {
+    await requireRole(req, "admin");
+    const ref = routesCol.doc(routeMatch[1]);
+    await db.runTransaction(async (t) => {
+      const snap = await t.get(ref);
+      if (!snap.exists) throw new HttpError(404, "Reys topilmadi");
+      if (snap.data().status !== "planned") throw new HttpError(409, "Boshlangan reysni bekor qilib bo'lmaydi");
+      const orders = await t.getAll(...snap.data().orderIds.map((id) => ordersCol.doc(id)));
+      for (const o of orders) if (o.exists && o.data().routeId === ref.id) t.update(o.ref, { routeId: null });
+      t.delete(ref);
+    });
+    return res.json({ ok: true });
+  }
+
+  if (path === "/api/driver/routes" && method === "GET") {
+    const { user } = await requireDriver(req);
+    return res.json(await driverRoutes(user));
+  }
+  const startMatch = path.match(/^\/api\/driver\/routes\/([\w-]{1,64})\/start$/);
+  if (startMatch && method === "POST") {
+    const { user } = await requireDriver(req);
+    await startRoute(startMatch[1], user);
+    return res.json(await driverRoutes(user));
+  }
+  const handMatch = path.match(/^\/api\/driver\/stops\/([\w-]{1,64})\/handed$/);
+  if (handMatch && method === "POST") {
+    const { user } = await requireDriver(req);
+    await handOver(handMatch[1], user);
+    return res.json(await driverRoutes(user));
+  }
+  return null;
+}
+
 async function route(req, res) {
   const path = req.path;
   const method = req.method;
@@ -1948,7 +2264,8 @@ async function route(req, res) {
     const { user } = await requireRole(req, "admin");
     const code = randomUUID().replace(/-/g, "").slice(0, 24);
     const expiresAt = Date.now() + INVITE_TTL_MS;
-    await invitesCol.doc(code).set({ role: "warehouse", createdBy: user.id, createdAt: Date.now(), expiresAt });
+    const role = req.body?.role === "driver" ? "driver" : "warehouse";
+    await invitesCol.doc(code).set({ role, createdBy: user.id, createdAt: Date.now(), expiresAt });
     const link = `https://t.me/${await getBotUsername()}?start=inv_${code}`;
     return res.status(201).json({ link, expiresAt });
   }
@@ -2121,6 +2438,10 @@ async function route(req, res) {
     const handled = await handleFulfillment(req, res, path, method);
     if (handled !== null) return handled;
   }
+  if (path.startsWith("/api/vehicles") || path.startsWith("/api/routes") || path.startsWith("/api/driver/") || path === "/api/logistics") {
+    const handled = await handleLogistics(req, res, path, method);
+    if (handled !== null) return handled;
+  }
 
   // The buyer closed the payment window without paying: give the reserved stock back right away.
   const cancelMatch = path.match(/^\/api\/orders\/([\w-]{1,64})\/cancel$/);
@@ -2206,9 +2527,11 @@ export const closeShipped = onSchedule(
   { schedule: "every 6 hours", region: REGION, secrets: [BOT_TOKEN] },
   async () => {
     const cutoff = Date.now() - AUTO_CLOSE_MS;
+    const handedCutoff = Date.now() - HANDED_CLOSE_MS;
     const snap = await ordersCol.where("stage", "==", "shipped").get();
     for (const doc of snap.docs) {
-      if (doc.data().stageAt >= cutoff) continue;
+      const { stageAt, handedAt } = doc.data();
+      if (stageAt >= cutoff && !(handedAt && handedAt < handedCutoff)) continue;
       await setStage(doc.id, ["shipped"], "delivered", { autoClosed: true }).catch((err) => logger.warn("auto close failed", err));
     }
   },
