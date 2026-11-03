@@ -40,6 +40,7 @@ const adminLoginsCol = db.collection("adminLogins");
 const adminSessionsCol = db.collection("adminSessions");
 const countersRef = db.collection("meta").doc("counters");
 const deliveryRef = db.collection("meta").doc("delivery");
+const segmentsRef = db.collection("meta").doc("segments");
 
 const PROJECT_ID = process.env.GCLOUD_PROJECT;
 // A project can serve the app from an extra Hosting site (a branded web.app name); WEBAPP_URL in
@@ -237,6 +238,28 @@ function parseLocation(value) {
 const DELIVERY_DEFAULTS = { perKm: 1500, unloading: 100000, perFloor: 20000, freeFloors: 2, warehouse: null };
 // Straight-line distance understates city roads; this factor approximates the driven route.
 const ROAD_FACTOR = 1.3;
+
+// CRM segment thresholds. The panel derives segments from orders; admins tune these in Sozlamalar.
+const SEGMENT_DEFAULTS = { vipSpend: 20_000_000, repeatOrders: 2, lostAfterDays: 90, vipLapse: true };
+
+async function segmentSettings() {
+  return { ...SEGMENT_DEFAULTS, ...(await segmentsRef.get()).data() };
+}
+
+function cleanSegmentSettings(input) {
+  const int = (v, min, max, name) => {
+    const n = Math.round(Number(v));
+    if (!(n >= min && n <= max)) throw new HttpError(400, `${name} noto'g'ri`);
+    return n;
+  };
+  return {
+    vipSpend: int(input.vipSpend, 1, 10_000_000_000, "VIP summasi"),
+    repeatOrders: int(input.repeatOrders, 2, 100, "Doimiy uchun xaridlar soni"),
+    lostAfterDays: int(input.lostAfterDays, 7, 3650, "Kunlar soni"),
+    vipLapse: input.vipLapse === true,
+    updatedAt: Date.now(),
+  };
+}
 
 async function deliverySettings() {
   return { ...DELIVERY_DEFAULTS, ...(await deliveryRef.get()).data() };
@@ -996,6 +1019,8 @@ function orderSummary(id, o) {
     cancelReason: o.cancelReason ?? null,
     name: o.name,
     phone: o.phone,
+    // The buyer's Telegram account: the CRM merges orders placed with different phone numbers.
+    customerId: o.telegramUserId ?? null,
     lines: o.items.map((i) => ({ id: i.id, name: i.name, qty: i.qty, price: i.price, kind: i.kind ?? "item" })),
     deliverySlot: o.deliverySlot ?? null,
     deliveryLabel: o.deliveryLabel ?? null,
@@ -1773,6 +1798,16 @@ async function route(req, res) {
 
   if (path === "/api/delivery/quote" && method === "POST") {
     return res.json(quoteDelivery(await deliverySettings(), req.body || {}));
+  }
+
+  if (path === "/api/crm/segments") {
+    await requireRole(req, "admin");
+    if (method === "GET") return res.json(await segmentSettings());
+    if (method === "PUT") {
+      const next = cleanSegmentSettings(req.body || {});
+      await segmentsRef.set(next);
+      return res.json(next);
+    }
   }
 
   if (path === "/api/delivery/settings") {

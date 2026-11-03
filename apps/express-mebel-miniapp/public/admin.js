@@ -749,50 +749,77 @@ views.accounting = async (page, tools) => {
 // ---------- CRM: customers grouped by phone from their orders ----------
 const normPhone = (p) => String(p || "").replace(/\D/g, "").slice(-9);
 const SEGMENT = { vip: ["VIP", "ok"], repeat: ["Doimiy", "teal"], new: ["Yangi", ""], lost: ["Uzoq kelmagan", "warn"] };
-const VIP_SPEND = 20_000_000;
-const LOST_AFTER_DAYS = 90;
-
-function customers(orders) {
-  const map = new Map();
+// One customer = every order sharing a phone number or a Telegram account, so a buyer who
+// switches numbers (or writes the same number differently) never shows up twice.
+function customers(orders, rules) {
+  const byKey = new Map();
+  const list = new Set();
   for (const o of [...orders].sort((a, b) => a.createdAt - b.createdAt)) {
-    const key = normPhone(o.phone);
-    if (!key) continue;
-    const c = map.get(key) || { key, name: o.name, phone: o.phone, orders: [], spent: 0, cancelled: 0, first: o.createdAt, last: o.createdAt };
+    const keys = [normPhone(o.phone) && `p${normPhone(o.phone)}`, o.customerId && `t${o.customerId}`].filter(Boolean);
+    if (!keys.length) continue;
+    const found = [...new Set(keys.map((k) => byKey.get(k)).filter(Boolean))];
+    const c = found[0] || { key: keys[0], keys: new Set(), phones: new Map(), name: o.name, orders: [], spent: 0, cancelled: 0 };
+    for (const other of found.slice(1)) {
+      c.orders.push(...other.orders);
+      other.keys.forEach((k) => c.keys.add(k));
+      other.phones.forEach((ph, k) => c.phones.set(k, ph));
+      list.delete(other);
+    }
     c.orders.push(o);
     c.name = o.name || c.name;
-    c.last = o.createdAt;
-    if (isSale(o)) c.spent += o.total;
-    if (o.status === "cancelled" && o.stage !== null) c.cancelled++;
-    map.set(key, c);
+    if (normPhone(o.phone)) c.phones.set(normPhone(o.phone), o.phone);
+    keys.forEach((k) => c.keys.add(k));
+    for (const k of c.keys) byKey.set(k, c);
+    list.add(c);
   }
-  return [...map.values()].map((c) => {
-    const bought = c.orders.filter(isSale).length;
-    const segment = c.spent >= VIP_SPEND ? "vip" : Date.now() - c.last > LOST_AFTER_DAYS * DAY && bought ? "lost" : bought >= 2 ? "repeat" : "new";
-    return { ...c, bought, segment };
+  const lostAfter = rules.lostAfterDays * DAY;
+  return [...list].map((c) => {
+    const orders = c.orders.sort((a, b) => a.createdAt - b.createdAt);
+    const sales = orders.filter(isSale);
+    const spent = sales.reduce((n, o) => n + o.total, 0);
+    const last = orders.at(-1).createdAt;
+    const vip = spent >= rules.vipSpend;
+    const lost = sales.length > 0 && Date.now() - last > lostAfter && (!vip || rules.vipLapse);
+    const segment = lost ? "lost" : vip ? "vip" : sales.length >= rules.repeatOrders ? "repeat" : "new";
+    return {
+      ...c,
+      orders,
+      phone: [...c.phones.values()].reverse().join(", "),
+      bought: sales.length,
+      spent,
+      vip,
+      cancelled: orders.filter((o) => o.status === "cancelled" && o.stage !== null).length,
+      first: orders[0].createdAt,
+      last,
+      segment,
+    };
   });
 }
+
+const segmentPill = (c) => pill(c.segment === "lost" && c.vip ? ["Uzoq kelmagan · VIP", "warn"] : SEGMENT[c.segment]);
 
 views.crm = async (page, tools) => {
   let query = "";
   let seg = "all";
   tools.innerHTML = '<button class="btn btn--ghost" type="button" id="crmCsv">⬇️ Mijozlar bazasi (CSV)</button>';
-  const list = customers(await ordersFor(365)).sort((a, b) => b.spent - a.spent);
+  const [orders, rules] = await Promise.all([ordersFor(365), api("/api/crm/segments")]);
+  const list = customers(orders, rules).sort((a, b) => b.spent - a.spent);
   const count = (k) => list.filter((c) => c.segment === k).length;
   const shown = () => list.filter((c) => (seg === "all" || c.segment === seg) && (!query || `${c.name} ${c.phone}`.toLowerCase().includes(query.toLowerCase())));
   const draw = () => {
     $("#crmRows").innerHTML =
       shown()
-        .map((c) => `<tr class="click" data-cust="${c.key}"><td><b>${esc(c.name)}</b></td><td>${esc(c.phone)}</td><td>${pill(SEGMENT[c.segment])}</td><td class="num">${c.bought}</td><td class="num">${sum(c.spent)}</td><td class="num">${sum(c.bought ? c.spent / c.bought : 0)}</td><td>${when(c.last)}</td><td class="num">${c.cancelled || ""}</td></tr>`)
+        .map((c) => `<tr class="click" data-cust="${c.key}"><td><b>${esc(c.name)}</b></td><td>${esc(c.phone)}</td><td>${segmentPill(c)}</td><td class="num">${c.bought}</td><td class="num">${sum(c.spent)}</td><td class="num">${sum(c.bought ? c.spent / c.bought : 0)}</td><td>${when(c.last)}</td><td class="num">${c.cancelled || ""}</td></tr>`)
         .join("") || '<tr><td colspan="8" class="empty">Mijoz topilmadi</td></tr>';
     page.querySelectorAll("[data-seg]").forEach((b) => b.classList.toggle("on", b.dataset.seg === seg));
   };
   const total = list.reduce((n, c) => n + c.spent, 0);
   page.innerHTML = `
     <div class="grid cols-4">
-      <div class="card kpi"><small>Mijozlar · 12 oy</small><b>${list.length}</b><span>telefon raqami bo'yicha</span></div>
+      <div class="card kpi"><small>Mijozlar · 12 oy</small><b>${list.length}</b><span>telefon va Telegram bo'yicha, dublsiz</span></div>
       <div class="card kpi"><small>Takror xarid qilganlar</small><b>${list.filter((c) => c.bought >= 2).length}</b><span>${list.length ? Math.round((list.filter((c) => c.bought >= 2).length / list.length) * 100) : 0}% mijozlardan</span></div>
       <div class="card kpi"><small>Bir mijozdan o'rtacha</small><b>${sum(list.length ? total / list.length : 0)} so'm</b><span>&nbsp;</span></div>
-      <div class="card kpi"><small>VIP (${sum(VIP_SPEND)}+)</small><b>${count("vip")}</b><span>uzoq kelmagan: ${count("lost")}</span></div>
+      <div class="card kpi"><small>VIP (${sum(rules.vipSpend)}+)</small><b>${count("vip")}</b><span>uzoq kelmagan: ${count("lost")}</span></div>
     </div>
     <div class="stack" style="margin:16px 0 12px">
       <div class="seg">${[["all", "Hammasi"], ["vip", "VIP"], ["repeat", "Doimiy"], ["new", "Yangi"], ["lost", "Uzoq kelmagan"]].map(([k, l]) => `<button type="button" data-seg="${k}">${l}</button>`).join("")}</div>
@@ -818,7 +845,7 @@ views.crm = async (page, tools) => {
     if (!row) return;
     const c = list.find((x) => x.key === row.dataset.cust);
     openDrawer(c.name || c.phone, (body) => {
-      body.innerHTML = `<dl class="specs"><dt>Telefon</dt><dd>${esc(c.phone)}</dd><dt>Segment</dt><dd>${pill(SEGMENT[c.segment])}</dd>
+      body.innerHTML = `<dl class="specs"><dt>Telefon</dt><dd>${esc(c.phone)}</dd><dt>Segment</dt><dd>${segmentPill(c)}</dd>
         <dt>Birinchi buyurtma</dt><dd>${when(c.first)}</dd><dt>Xaridlar</dt><dd>${c.bought} ta · ${sum(c.spent)} so'm</dd><dt>Bekor qilgan</dt><dd>${c.cancelled} ta</dd></dl>
         <h3 style="margin-bottom:10px">Buyurtmalari</h3>
         <ul class="list">${[...c.orders].reverse().map((o) => `<li data-order="${o.id}" style="cursor:pointer"><span>${no(o)} · ${when(o.createdAt)}<br><span class="muted">${esc(o.lines.map((l) => `${l.name} × ${l.qty}`).join(", "))}</span></span><span>${sum(o.total)} ${pill(orderState(o))}</span></li>`).join("")}</ul>`;
@@ -1004,7 +1031,7 @@ views.staff = async (page, tools) => {
 };
 
 views.settings = async (page) => {
-  const cfg = await api("/api/delivery/settings");
+  const [cfg, seg] = await Promise.all([api("/api/delivery/settings"), api("/api/crm/segments")]);
   const info = state.info;
   page.innerHTML = `
     <div class="grid cols-2">
@@ -1023,6 +1050,18 @@ views.settings = async (page) => {
           <button class="btn" type="submit" style="margin-top:8px">Saqlash</button>
         </form>
       </div>
+      <div class="card"><h3>👥 Mijoz segmentlari</h3>
+        <form id="sForm">
+          <div class="row2">
+            <label class="field">VIP: jami xarid, so'mdan<input class="input" name="vipSpend" type="number" min="1" step="1000" value="${seg.vipSpend}" /></label>
+            <label class="field">Doimiy: kamida xaridlar soni<input class="input" name="repeatOrders" type="number" min="2" max="100" value="${seg.repeatOrders}" /></label>
+          </div>
+          <label class="field">Uzoq kelmagan: oxirgi buyurtmadan keyin, kun<input class="input" name="lostAfterDays" type="number" min="7" max="3650" value="${seg.lostAfterDays}" /></label>
+          <label class="check"><input type="checkbox" name="vipLapse" ${seg.vipLapse ? "checked" : ""} /> VIP mijoz ham shuncha kun kelmasa «Uzoq kelmagan · VIP» ga o'tadi</label>
+          <p class="muted">Segmentlar oxirgi 12 oydagi buyurtmalardan avtomatik hisoblanadi. Tartib: Uzoq kelmagan → VIP → Doimiy → Yangi. Bitta telefon raqami yoki bitta Telegram akkaunti = bitta mijoz.</p>
+          <button class="btn" type="submit" style="margin-top:8px">Saqlash</button>
+        </form>
+      </div>
       <div class="card"><h3>Tizim</h3><dl class="specs">
         <dt>Loyiha</dt><dd>${esc(info.project)}</dd>
         <dt>Bot</dt><dd>${info.bot ? `@${esc(info.bot)}` : "—"}</dd>
@@ -1035,6 +1074,17 @@ views.settings = async (page) => {
         <dt>Bo'limlar</dt><dd>${info.categories.map((c) => esc(c.name)).join(", ")}</dd>
       </dl><p class="muted">Bot tokeni, adminlar ro'yxati va to'lov tokeni xavfsizlik uchun faqat Cloud Shell orqali o'zgartiriladi.</p></div>
     </div>`;
+  $("#sForm").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    try {
+      await api("/api/crm/segments", { method: "PUT", body: { vipSpend: f.get("vipSpend"), repeatOrders: f.get("repeatOrders"), lostAfterDays: f.get("lostAfterDays"), vipLapse: f.has("vipLapse") } });
+      toast("Saqlandi");
+      render();
+    } catch (err) {
+      toast(err.message);
+    }
+  };
   $("#dForm").onsubmit = async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
