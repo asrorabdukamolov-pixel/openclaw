@@ -223,7 +223,7 @@ Havola 24 soat va bir marta ishlaydi. Xodimni o'chirish: o'sha bo'limda **O'chir
 - **Bot tokeni**: `firebase functions:secrets:set BOT_TOKEN --project <ID>` → `firebase deploy --only functions --project <ID>` → `/api/setup` ni qayta oching.
 - **Kod yangilansa**: `git pull` → `firebase deploy --project <ID>`.
 - **Brend nomli sayt manzili** (masalan `expressmarket.web.app`): `firebase hosting:sites:create expressmarket --project <ID>` →
-  `firebase target:apply hosting app <ID> expressmarket --project <ID>` (ilova ikkala saytda ham turadi) →
+  `firebase target:clear hosting app --project <ID>` → `firebase target:apply hosting app expressmarket --project <ID>` (deploy endi shu saytga boradi) →
   `functions/.env.<ID>` ga `WEBAPP_URL=https://expressmarket.web.app` qatorini qo'shing → `firebase deploy --project <ID>` →
   `https://expressmarket.web.app/api/setup` ni oching (bot tugmasi va webhook yangi manzilga o'tadi).
 - Ma'lumotlarni Firebase konsolida ko'rish: **Firestore** → `products`, `stockMovements`, `orders`, `banners`.
