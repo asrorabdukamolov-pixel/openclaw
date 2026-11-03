@@ -286,7 +286,7 @@ function parseLocation(value) {
 const DELIVERY_DEFAULTS = {
   perKm: 1500,
   unloadingPercent: 1.5,
-  unloadingMin: 50000,
+  unloadingMin: 10000,
   perFloor: 20000,
   freeFloors: 2,
   commission: 20,

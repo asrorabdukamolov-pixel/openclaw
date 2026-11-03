@@ -146,7 +146,7 @@ Bu versiyani yuklagandan keyin `/api/setup` ni **qayta oching**: mavjud mahsulot
 
 ## Yetkazish narxi
 
-Sozlamalar → Yetkazish narxlari: **1 km narxi**, **uy ichigacha tushirish** = savdo summasining % (hozir 1,5%, eng kami 50 000),
+Sozlamalar → Yetkazish narxlari: **1 km narxi**, **uy ichigacha tushirish** = savdo summasining % (hozir 1,5%, eng kami 10 000),
 **liftsiz har qavat** (1–2-qavat bepul) va **kompaniya komissiyasi** (yetkazish pulidan, hozir 20%). Haydovchi har topshirilgan
 manzil uchun yetkazish pulining komissiyadan qolgan qismini oladi (topshirish paytida buyurtmaga yoziladi).
 
