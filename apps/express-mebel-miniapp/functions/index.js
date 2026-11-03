@@ -2367,6 +2367,14 @@ async function handleDriverText(msg, staff) {
     await staffCol.doc(String(user.id)).update({ awaitingCash: null });
     return closeStop(msg.chat.id, user, awaiting, () => handOver(awaiting, user, { cash }), cash);
   }
+  if (msg.text === "/start") {
+    const trust = staff.employment === "staff" ? "shtatda" : staff.employment === "contract" ? "alohida (yollanma)" : "ish turi HR tomonidan belgilanmagan";
+    await dtg("sendMessage", {
+      chat_id: msg.chat.id,
+      text: `👋 Salom, ${staff.name}! Siz Express Market haydovchisisiz (${trust}).\n${staff.cashAllowed ? "💵 Sizga naqd to'lovli buyurtmalar ham biriktiriladi." : "💳 Sizga oldindan to'langan buyurtmalar biriktiriladi."}\nReyslaringiz pastdagi «📋 Reyslarim» tugmasida.`,
+      reply_markup: DRIVER_MENU,
+    });
+  }
   return sendRoutes(msg.chat.id, user);
 }
 
