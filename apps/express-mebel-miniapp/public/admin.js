@@ -188,7 +188,7 @@ const views = {};
 views.dashboard = async (page, tools) => {
   tools.innerHTML = periodSeg();
   bindPeriod(render);
-  const [orders, complaints] = await Promise.all([ordersFor(state.period), api("/api/complaints")]);
+  const [orders, complaints, cash] = await Promise.all([ordersFor(state.period), api("/api/complaints"), api(`/api/cash?from=${Date.now() - DAY}`)]);
   const sales = orders.filter(isSale);
   const revenue = sales.reduce((n, o) => n + o.total, 0);
   const cancelled = orders.filter((o) => o.status === "cancelled" && o.stage !== null);
@@ -217,6 +217,7 @@ views.dashboard = async (page, tools) => {
         <li><span>💳 Pul qaytarish kutilmoqda</span><a href="#accounting">${refunds.length}</a></li>
         <li><span>⏳ Tayyor, vaqt tanlanmagan</span><a href="#orders">${noSlot.length}</a></li>
         <li><span>🚚 Topshirilmadi, qaror kerak</span><a href="#logistics">${held.length}</a></li>
+        <li><span>💵 Kassaga topshirilmagan naqd</span><a href="#cash">${sum(cash.pending.reduce((n, g) => n + g.total, 0))}</a></li>
         <li><span>🛠 Faol shikoyatlar</span><a href="#complaints">${complaints.filter((c) => ["open", "in_progress"].includes(c.status)).length}</a></li>
         <li><span>📦 Kam qolgan mahsulotlar (≤ 3)</span><a href="#stock">${low.length}</a></li>
       </ul></div>
@@ -379,6 +380,7 @@ const XLS_COLUMNS = [
   ["oldPrice", "Eski narx", "Chegirma uchun: narxdan katta bo'lsin. Bo'sh = chegirma yo'q."],
   ["stock", "Qoldiq", "Ombordagi soni. O'zgarsa, ombor jurnaliga «Excel import» bo'lib yoziladi. Komplektda yozilmaydi."],
   ["boxes", "Qutilar soni", "Bitta mahsulot nechta qutida (har qutiga alohida yorliq)."],
+  ["cost", "Tannarx", "Bitta mahsulotning kirim narxi, so'm (faqat adminlar ko'radi). Foyda hisobi shundan. Komplektda yozilmaydi: modullardan hisoblanadi."],
   ["weight", "Og'irligi, kg", "Bitta mahsulot qadog'i bilan, kg. Logistika mashina sig'imini shu bo'yicha hisoblaydi. Komplektda yozilmaydi."],
   ["size", "O'lcham", "Masalan: 120×60×75 sm"],
   ["material", "Material", "Masalan: LDSP 16 mm"],
@@ -410,7 +412,7 @@ async function exportCatalog() {
     const kit = isKit(p);
     const cells = {
       id: p.id, sku: kit ? "" : p.sku ?? "", kind: kit ? "Komplekt" : "Mahsulot", name: p.name, category: catName(p.category),
-      price: p.price, oldPrice: p.oldPrice ?? "", stock: kit ? "" : p.stock, boxes: kit ? "" : p.boxes ?? 1, weight: kit ? "" : p.weight ?? "",
+      price: p.price, oldPrice: p.oldPrice ?? "", stock: kit ? "" : p.stock, boxes: kit ? "" : p.boxes ?? 1, cost: kit ? "" : p.cost ?? "", weight: kit ? "" : p.weight ?? "",
       size: p.size ?? "", material: p.material ?? "", description: p.description ?? "",
       standalone: kit ? "" : yesNo(p.standalone !== false), isNew: yesNo(p.isNew), draft: yesNo(p.draft),
       components: kit ? p.parts.map((c) => `${c.sku ?? c.name}×${c.qty}`).join("; ") : "",
@@ -599,6 +601,7 @@ function productForm(id, newKind = "item") {
              <label class="field">Tayyorlash muddati (kun)<input class="input" name="leadDays" type="number" min="1" max="120" value="${p?.leadDays ?? 10}" /></label></div>`
           : `<div class="row2"><label class="field">Qutilar soni<input class="input" name="boxes" type="number" min="1" max="20" value="${p?.boxes ?? 1}" /></label>
              ${p ? `<div class="field">Omborda<b style="color:var(--ink);font-size:16px">${p.stock} ta</b></div>` : `<label class="field">Boshlang'ich qoldiq<input class="input" name="stock" type="number" min="0" value="0" /></label>`}</div>
+             <label class="field">Tannarx, so'm (faqat adminlar ko'radi)<input class="input" name="cost" type="number" min="0" value="${p?.cost ?? ""}" placeholder="foyda hisobi uchun" /></label>
              <label class="field">Og'irligi, kg (qadoq bilan, ixtiyoriy)<input class="input" name="weight" type="number" min="0" step="0.1" value="${p?.weight ?? ""}" placeholder="logistika uchun" /></label>
              <label class="check"><input type="checkbox" name="standalone" ${p?.standalone === false ? "" : "checked"} /> Katalogda alohida sotiladi</label>`
       }
@@ -689,7 +692,7 @@ function productForm(id, newKind = "item") {
       };
       const payload = kit
         ? { ...common, kind: "kit", components: parts, whenShort: f.get("whenShort"), leadDays: Number(f.get("leadDays")) }
-        : { ...common, kind: "item", boxes: Number(f.get("boxes")), weight: f.get("weight") || null, standalone: f.has("standalone"), stock: Number(f.get("stock") || 0) };
+        : { ...common, kind: "item", boxes: Number(f.get("boxes")), weight: f.get("weight") || null, cost: f.get("cost") === "" ? null : f.get("cost"), standalone: f.has("standalone"), stock: Number(f.get("stock") || 0) };
       try {
         await api(p ? `/api/products/${p.id}` : "/api/products", { method: p ? "PUT" : "POST", body: payload });
         await refreshProducts();
@@ -799,9 +802,31 @@ function stockForm(id) {
 views.finance = async (page, tools) => {
   tools.innerHTML = `${periodSeg()} <button class="btn btn--ghost" type="button" id="finCsv">⬇️ Kunlik hisobot (CSV)</button>`;
   bindPeriod(render);
-  const orders = await ordersFor(state.period);
+  const from = Date.now() - state.period * DAY;
+  const [orders, cash] = await Promise.all([ordersFor(state.period), api(`/api/cash?from=${from}`)]);
   const sales = orders.filter(isSale);
   const goodsSum = sales.reduce((n, o) => n + o.goodsTotal, 0);
+  // Cost of goods from today's product costs; a kit costs its modules. Lines without a cost are counted, not guessed.
+  const unitCost = (id) => {
+    const p = byId(id);
+    if (!p) return null;
+    if (!isKit(p)) return p.cost ?? null;
+    const parts = (p.components ?? []).map((c) => [byId(c.id)?.cost, c.qty]);
+    return parts.every(([v]) => v != null) ? parts.reduce((n, [v, q]) => n + v * q, 0) : null;
+  };
+  let cogs = 0;
+  const noCost = new Set();
+  for (const o of sales) for (const l of o.lines) {
+    const c = unitCost(l.id);
+    if (c === null) noCost.add(l.name);
+    else cogs += c * l.qty;
+  }
+  const expenses = cash.entries.filter((e) => e.type === "out" && !cash.categories.notExpense.includes(e.category));
+  const expenseSum = expenses.reduce((n, e) => n + e.amount, 0);
+  const byCategory = Object.entries(cash.categories.out)
+    .map(([k, label]) => ({ label, value: expenses.filter((e) => e.category === k).reduce((n, e) => n + e.amount, 0) }))
+    .filter((x) => x.value)
+    .map((x) => ({ ...x, text: sum(x.value) }));
   const delivery = sales.reduce((n, o) => n + o.deliveryTotal, 0);
   const card = sales.filter((o) => o.payment === "card").reduce((n, o) => n + o.total, 0);
   const cashDone = sales.filter((o) => o.payment === "cash" && o.stage === "delivered").reduce((n, o) => n + o.total, 0);
@@ -827,7 +852,17 @@ views.finance = async (page, tools) => {
       <div class="card kpi"><small>💵 Naqd</small><b>${sum(cashDone)} so'm</b><span>olingan · kutilmoqda ${sum(cashWait)}</span></div>
       <div class="card kpi"><small>Bekor / qaytarish</small><b>${sum(cancelledSum)} so'm</b><span>qaytarish kutilmoqda ${sum(refundsWait)}</span></div>
     </div>
-    <div class="card" style="margin-top:16px"><h3>Kunlik tushum</h3>${barChart(dailyPoints(sales, Math.min(state.period, 30), (o) => o.total))}</div>
+    <div class="grid cols-4" style="margin-top:16px">
+      <div class="card kpi"><small>Tannarx (sotilgan)</small><b>${sum(cogs)} so'm</b><span>${noCost.size ? `${noCost.size} ta mahsulotda tannarx yo'q` : "hamma mahsulotda bor"}</span></div>
+      <div class="card kpi"><small>Yalpi foyda</small><b>${sum(goodsSum - cogs)} so'm</b><span>${goodsSum ? Math.round(((goodsSum - cogs) / goodsSum) * 100) : 0}% marja (mahsulotdan)</span></div>
+      <div class="card kpi"><small>Xarajatlar</small><b>${sum(expenseSum)} so'm</b><span>kassadan · ${expenses.length} ta</span></div>
+      <div class="card kpi"><small>Sof foyda</small><b>${sum(goodsSum + delivery - cogs - expenseSum)} so'm</b><span>tushum − tannarx − xarajat</span></div>
+    </div>
+    ${noCost.size ? `<p class="note" style="margin-top:12px">⚠️ Tannarx kiritilmagan: ${esc([...noCost].slice(0, 6).join(", "))}${noCost.size > 6 ? "…" : ""}. Mahsulotlar → mahsulotni ochib «Tannarx» ni kiriting yoki Excel'dagi «Tannarx» ustunini to'ldiring. Ungacha foyda yuqori ko'rinadi.</p>` : ""}
+    <div class="grid cols-2" style="margin-top:16px">
+      <div class="card"><h3>Kunlik tushum</h3>${barChart(dailyPoints(sales, Math.min(state.period, 30), (o) => o.total))}</div>
+      <div class="card"><h3>Xarajatlar kategoriya bo'yicha</h3>${byCategory.length ? hbars(byCategory) : '<p class="muted">Bu davrda xarajat kiritilmagan. Kassa → Chiqim.</p>'}</div>
+    </div>
     <div class="table-wrap" style="margin-top:16px"><table>
       <thead><tr><th>Sana</th><th class="num">Buyurtma</th><th class="num">Mahsulot</th><th class="num">Yetkazish</th><th class="num">Karta</th><th class="num">Naqd</th><th class="num">Jami</th></tr></thead>
       <tbody>${daily
@@ -835,9 +870,111 @@ views.finance = async (page, tools) => {
         .map((d) => `<tr><td>${d.day}</td><td class="num">${d.count}</td><td class="num">${sum(d.goods)}</td><td class="num">${sum(d.delivery)}</td><td class="num">${sum(d.card)}</td><td class="num">${sum(d.cash)}</td><td class="num"><b>${sum(d.goods + d.delivery)}</b></td></tr>`)
         .join("") || '<tr><td colspan="7" class="empty">Bu davrda sotuv yo\'q</td></tr>'}</tbody>
     </table></div>
-    <p class="muted" style="margin-top:10px">Xarajatlar (zakup, maosh, ijara) va foyda hisobi moliya modulining keyingi bosqichida qo'shiladi.</p>`;
+    <p class="muted" style="margin-top:10px">Tushum buyurtma sanasi bo'yicha; xarajatlar Kassa daftaridan. Tannarx mahsulotning hozirgi tannarxidan hisoblanadi.</p>`;
   $("#finCsv").onclick = () => download(`moliya-${dayKey(Date.now())}.csv`, [["Sana", "Buyurtmalar", "Mahsulot", "Yetkazish", "Karta", "Naqd", "Jami"], ...daily.map((d) => [d.day, d.count, d.goods, d.delivery, d.card, d.cash, d.goods + d.delivery])]);
 };
+
+// ---------- cash desk: accept drivers' and shop cash, book income and expenses ----------
+views.cash = async (page, tools) => {
+  tools.innerHTML = `${periodSeg()} <button class="btn btn--ghost" type="button" id="cashCsv">⬇️ Kassa daftari (CSV)</button>`;
+  bindPeriod(render);
+  const data = await api(`/api/cash?from=${Date.now() - state.period * DAY}`);
+  const cats = { ...data.categories.in, ...data.categories.out };
+  const pendingTotal = data.pending.reduce((n, g) => n + g.total, 0);
+  const today = data.entries.filter((e) => dayKey(e.at) === dayKey(Date.now()));
+  const outToday = today.filter((e) => e.type === "out").reduce((n, e) => n + e.amount, 0);
+  const inToday = today.filter((e) => e.type === "in").reduce((n, e) => n + e.amount, 0);
+  page.innerHTML = `
+    <div class="grid cols-4">
+      <div class="card kpi"><small>💵 Kassadagi qoldiq</small><b>${sum(data.balance)} so'm</b><span>hozir</span></div>
+      <div class="card kpi"><small>Qabul qilinmagan naqd</small><b>${sum(pendingTotal)} so'm</b><span>${data.pending.length} ta odamda</span></div>
+      <div class="card kpi"><small>Bugun kirim</small><b>${sum(inToday)} so'm</b><span>&nbsp;</span></div>
+      <div class="card kpi"><small>Bugun chiqim</small><b>${sum(outToday)} so'm</b><span>&nbsp;</span></div>
+    </div>
+    <div class="grid cols-2" style="margin-top:16px">
+      <div class="card"><h3>🚚 Haydovchi va do'kondagi naqd</h3><ul class="list">${
+        data.pending
+          .map((g) => `<li><span><b>${esc(g.name)}</b><br><span class="muted">${g.orders.length} ta buyurtma · eng eskisi ${when(Math.min(...g.orders.map((o) => o.at)))}</span></span><span style="display:flex;gap:10px;align-items:center"><b>${sum(g.total)}</b><button class="btn" type="button" data-settle="${esc(g.holder)}">Qabul qilish</button></span></li>`)
+          .join("") || '<li class="muted">Hamma naqd kassaga topshirilgan</li>'
+      }</ul><p class="muted" style="margin-top:10px">Haydovchi «Topshirdim» bosganda olgan naqdi shu yerga tushadi. Pulni sanab, «Qabul qilish» ni bosing: haydovchiga botda tasdiq boradi.</p></div>
+      <div class="card"><h3>➕ Kirim / ➖ Chiqim</h3>
+        <form id="entryForm" autocomplete="off">
+          <div class="row2">
+            <label class="field">Turi<select name="type" id="eType"><option value="out">➖ Chiqim (xarajat)</option><option value="in">➕ Kirim</option></select></label>
+            <label class="field">Kategoriya<select name="category" id="eCat"></select></label>
+          </div>
+          <label class="field">Summa, so'm<input class="input" name="amount" type="number" min="1" required /></label>
+          <label class="field">Izoh (nima uchun, kimga)<input class="input" name="note" required placeholder="Masalan: oktyabr ijarasi, Ali — avans" /></label>
+          <button class="btn" type="submit" style="margin-top:8px">Saqlash</button>
+        </form>
+        <p class="muted" style="margin-top:10px">Yozuvlar o'chirilmaydi: xato bo'lsa, teskari yozuv kiriting (masalan, ortiqcha chiqim bo'lsa — kirim).</p></div>
+    </div>
+    <div class="table-wrap" style="margin-top:16px"><table>
+      <thead><tr><th>Vaqt</th><th>Turi</th><th>Kategoriya</th><th>Kimdan / izoh</th><th class="num">Summa</th><th class="num">Farq</th><th class="num">Qoldiq</th><th>Kiritdi</th></tr></thead>
+      <tbody>${
+        data.entries
+          .map((e) => `<tr><td>${when(e.at)}</td><td>${e.type === "in" ? pill(["Kirim", "ok"]) : pill(["Chiqim", "bad"])}</td><td>${esc(cats[e.category] ?? e.category)}</td><td>${esc([e.holderName, e.note].filter(Boolean).join(" · "))}${e.orderIds?.length ? ` <span class="muted">(${e.orderIds.length} ta buyurtma)</span>` : ""}</td><td class="num"><b>${e.type === "in" ? "+" : "−"}${sum(e.amount)}</b></td><td class="num">${e.diff ? `<span style="color:${e.diff < 0 ? "#c0392b" : "inherit"}">${e.diff > 0 ? "+" : ""}${sum(e.diff)}</span>` : ""}</td><td class="num">${sum(e.balanceAfter)}</td><td>${esc(e.by)}</td></tr>`)
+          .join("") || '<tr><td colspan="8" class="empty">Bu davrda yozuv yo\'q</td></tr>'
+      }</tbody></table></div>`;
+  const fillCats = () => {
+    const list = $("#eType").value === "in" ? { other_in: data.categories.in.other_in } : Object.fromEntries(Object.entries(data.categories.out).filter(([k]) => k !== "refund"));
+    $("#eCat").innerHTML = Object.entries(list).map(([k, l]) => `<option value="${k}">${esc(l)}</option>`).join("");
+  };
+  fillCats();
+  $("#eType").onchange = fillCats;
+  $("#entryForm").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    try {
+      await api("/api/cash/entries", { method: "POST", body: { type: f.get("type"), category: f.get("category"), amount: f.get("amount"), note: f.get("note") } });
+      toast("Saqlandi");
+      render();
+    } catch (err) {
+      toast(err.message);
+    }
+  };
+  page.onclick = (e) => {
+    const b = e.target.closest("[data-settle]");
+    if (b) settleDrawer(data.pending.find((g) => g.holder === b.dataset.settle));
+  };
+  $("#cashCsv").onclick = () =>
+    download(`kassa-${dayKey(Date.now())}.csv`, [
+      ["Vaqt", "Turi", "Kategoriya", "Kimdan", "Izoh", "Summa", "Kutilgan", "Farq", "Qoldiq", "Kiritdi"],
+      ...data.entries.map((e) => [when(e.at), e.type === "in" ? "Kirim" : "Chiqim", cats[e.category] ?? e.category, e.holderName ?? "", e.note ?? "", e.type === "in" ? e.amount : -e.amount, e.expected ?? "", e.diff ?? "", e.balanceAfter, e.by]),
+    ]);
+};
+
+function settleDrawer(g) {
+  openDrawer(`Naqdni qabul qilish: ${g.name}`, (body) => {
+    body.innerHTML = `<p class="muted">Pulni sanang. Hammasini birdan yoki tanlangan buyurtmalarni qabul qiling.</p>
+      <ul class="list">${g.orders.map((o) => `<li><label class="check" style="flex:1"><input type="checkbox" data-o="${o.id}" data-amount="${o.amount}" checked/> <span><b>#${o.number ?? "—"}</b> ${esc(o.name)}<br><span class="muted">${when(o.at)}${o.by ? ` · ${esc(o.by)}` : ""}</span></span></label><b>${sum(o.amount)}</b></li>`).join("")}</ul>
+      <p style="margin-top:12px">Kutilgan: <b id="sExpected"></b></p>
+      <label class="field">Qo'lga olingan summa, so'm<input class="input" id="sReceived" type="number" min="0" /></label>
+      <label class="field">Izoh (summa farq qilsa majburiy)<input class="input" id="sNote" placeholder="Masalan: 50 000 kam — keyingi kuni beradi" /></label>
+      <button class="btn" type="button" id="sGo" style="margin-top:8px">✅ Kassaga qabul qilish</button>`;
+    const picked = () => [...body.querySelectorAll("[data-o]:checked")];
+    const update = () => {
+      const expected = picked().reduce((n, x) => n + Number(x.dataset.amount), 0);
+      $("#sExpected", body).textContent = `${sum(expected)} so'm`;
+      $("#sReceived", body).value = expected;
+    };
+    update();
+    body.onchange = (e) => {
+      if (e.target.matches("[data-o]")) update();
+    };
+    $("#sGo", body).onclick = async () => {
+      try {
+        await api("/api/cash/settle", { method: "POST", body: { orderIds: picked().map((x) => x.dataset.o), received: $("#sReceived", body).value, note: $("#sNote", body).value } });
+        toast("Kassaga qabul qilindi");
+        closeDrawer();
+        dropOrders();
+        render();
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+  });
+}
 
 views.accounting = async (page, tools) => {
   tools.innerHTML = `${periodSeg()} <button class="btn btn--ghost" type="button" id="accCsv">⬇️ 1C uchun (CSV)</button>`;
@@ -1569,6 +1706,7 @@ const TITLES = {
   products: "Mahsulotlar (SKU)",
   stock: "Ombor",
   finance: "Moliya",
+  cash: "Kassa",
   accounting: "Buxgalteriya",
   marketing: "Marketing",
   staff: "Xodimlar (HR)",
@@ -1579,11 +1717,12 @@ async function render() {
   const route = TITLES[location.hash.slice(1)] ? location.hash.slice(1) : "dashboard";
   document.querySelectorAll("#nav a").forEach((a) => a.classList.toggle("on", a.dataset.route === route));
   $("#pageTitle").textContent = TITLES[route];
-  const page = $("#page");
-  const tools = $("#topTools");
-  tools.innerHTML = "";
-  tools.onclick = null;
-  page.onclick = null;
+  // Fresh page and toolbar nodes per render: a slower earlier view still loading writes into the
+  // detached old nodes instead of over the page the user switched to.
+  const page = $("#page").cloneNode(false);
+  const tools = $("#topTools").cloneNode(false);
+  $("#page").replaceWith(page);
+  $("#topTools").replaceWith(tools);
   page.innerHTML = '<p class="empty">Yuklanmoqda…</p>';
   try {
     await views[route](page, tools);

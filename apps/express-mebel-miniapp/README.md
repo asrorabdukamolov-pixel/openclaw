@@ -219,6 +219,20 @@ Haydovchi Telegram ilovada **☰ → 🚚 Reyslarim**:
 
 Mahsulot og'irligi (kg) mahsulot formasida yoki Excel'dagi "Og'irligi, kg" ustunida kiritiladi; komplekt og'irligi modullardan hisoblanadi.
 
+## Kassa va moliya
+
+Panel → **💵 Kassa**:
+- **Haydovchi va do'kondagi naqd:** haydovchi «Topshirdim» da olgan naqd va do'kondan olib ketilgan naqd buyurtmalar shu yerda turadi.
+  Pulni sanab **Qabul qilish** → summa kassaga kirim bo'ladi, haydovchiga botda tasdiq boradi. Summa farq qilsa, izoh majburiy va farq (kamomad) daftarda qoladi.
+- **Kirim / Chiqim:** ijara, maosh, zakup, yoqilg'i, soliq, reklama, bankka topshirish va boshqalar; izoh majburiy.
+  Kassadagidan ko'p chiqim qilib bo'lmaydi. Yozuvlar o'chirilmaydi — xato teskari yozuv bilan tuzatiladi.
+- Naqd buyurtma bo'yicha **Pul qaytarildi** bosilsa, summa kassadan chiqim bo'ladi (karta qaytarishlari bank orqali).
+- **Kassa daftari** CSV'ga yuklanadi.
+
+Panel → **💰 Moliya**: tushum, **tannarx**, yalpi foyda va marja, kassadan xarajatlar kategoriya bo'yicha va **sof foyda**.
+Tannarx mahsulot formasida yoki Excel'dagi «Tannarx» ustunida kiritiladi; uni faqat adminlar ko'radi (mijoz, omborchi va ekranga yuborilmaydi).
+Komplekt tannarxi modullaridan hisoblanadi.
+
 ## Shikoyatlar
 
 - Mijoz "⚠️ Muammo bor" ni bosadi (yetkazilganda) yoki mini ilovada buyurtmani ochib **⚠️ Muammo bildirish** (yetkazilgandan keyin 30 kun ichida).

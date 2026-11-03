@@ -44,6 +44,8 @@ const vehiclesCol = db.collection("vehicles");
 const routesCol = db.collection("routes");
 const applicationsCol = db.collection("driverApplications");
 const complaintsCol = db.collection("complaints");
+const cashbookCol = db.collection("cashbook");
+const cashRef = db.collection("meta").doc("cash");
 const countersRef = db.collection("meta").doc("counters");
 const deliveryRef = db.collection("meta").doc("delivery");
 const segmentsRef = db.collection("meta").doc("segments");
@@ -135,6 +137,13 @@ function cleanKitParts(raw) {
   return [...qtyById].map(([id, qty]) => ({ id, qty }));
 }
 
+function cleanCost(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Math.round(Number(value));
+  if (!(n >= 0 && n <= 1_000_000_000)) throw new HttpError(400, "Tannarx noto'g'ri");
+  return n;
+}
+
 function cleanWeight(value) {
   if (value === null || value === undefined || value === "") return null;
   const kg = Math.round(Number(value) * 10) / 10;
@@ -194,6 +203,8 @@ function cleanProduct(input, existing = {}) {
     standalone: Boolean(input.standalone ?? existing.standalone ?? true),
     // Packages per unit: each box gets its own barcode label and is scanned when picking.
     boxes: Math.min(20, Math.max(1, Math.round(Number(input.boxes ?? existing.boxes ?? 1)) || 1)),
+    // Purchase cost per unit for profit reports; only admins ever see it.
+    cost: cleanCost(input.cost === undefined ? existing.cost : input.cost),
     // Packed weight per unit, kg; logistics sums it against the vehicle's load limit. Optional.
     weight: cleanWeight(input.weight === undefined ? existing.weight : input.weight),
     sku: existing.sku ?? null,
@@ -512,6 +523,12 @@ async function listProducts({ staff = false } = {}) {
     .sort((a, b) => b.createdAt - a.createdAt);
 }
 
+// The purchase cost stays with admins: buyers, warehouse staff and screens get products without it.
+function withoutCost(p) {
+  const { cost, ...rest } = p;
+  return rest;
+}
+
 // Kit modules must exist and be ordinary products (a kit inside a kit would hide its boxes).
 async function checkKitParts(t, components) {
   const snaps = await t.getAll(...components.map((c) => productsCol.doc(c.id)));
@@ -533,6 +550,7 @@ const IMPORT_FIELDS = {
   oldPrice: "eski narx",
   boxes: "qutilar",
   weight: "og'irlik",
+  cost: "tannarx",
   size: "o'lcham",
   material: "material",
   description: "tavsif",
@@ -618,7 +636,7 @@ async function importProducts(rows, { apply, actor }) {
     try {
       for (const [field, label] of Object.entries(IMPORT_FIELDS)) {
         const v = raw[field];
-        if (["price", "oldPrice", "boxes", "weight", "leadDays"].includes(field)) input[field] = importNumber(v, label);
+        if (["price", "oldPrice", "boxes", "weight", "cost", "leadDays"].includes(field)) input[field] = importNumber(v, label);
         else if (["standalone", "isNew", "draft"].includes(field)) input[field] = importFlag(v, label);
         else if (field === "category") input[field] = blank(v) ? undefined : importCategory(v);
         else if (field === "whenShort") input[field] = blank(v) ? undefined : /yash|hide/i.test(String(v)) ? "hide" : "preorder";
@@ -670,7 +688,7 @@ async function importProducts(rows, { apply, actor }) {
         const before = base[field] ?? null;
         const after = r.next[field] ?? null;
         if (r.kind === "item" && ["whenShort", "leadDays"].includes(field)) continue;
-        if (r.kind === "kit" && ["boxes", "weight", "standalone"].includes(field)) continue;
+        if (r.kind === "kit" && ["boxes", "weight", "cost", "standalone"].includes(field)) continue;
         if (JSON.stringify(before) !== JSON.stringify(after)) r.changes.push(`${label}: ${show(before)} → ${show(after)}`);
       }
       if (r.kind === "kit" && JSON.stringify(r.existing.components) !== JSON.stringify(r.next.components)) r.changes.push("komplekt tarkibi");
@@ -1831,6 +1849,10 @@ async function handleFulfillment(req, res, path, method) {
     }
     if (action === "ship") {
       const o = await setStage(id, ["ready"], "shipped", { shippedBy: actor });
+      // A pickup paid in cash is paid at the counter: that cash now waits for the desk.
+      if (o.orderType === "pickup" && amountDue(o) > 0) {
+        await ordersCol.doc(id).update({ cashPending: true, cashCollected: amountDue(o), cashBy: actor });
+      }
       return res.json(fulfillmentView(id, o));
     }
     const r = await pickBox(id, req.body || {}, actor);
@@ -2009,7 +2031,7 @@ async function handOver(orderId, user, body) {
   if (cash + card < due) {
     throw new HttpError(409, `To'liq emas: yana ${formatSum(due - cash - card)} kerak. «Qolganini karta bilan» yoki «Topshirib bo'lmadi» ni tanlang`);
   }
-  await ref.update({ handedAt: Date.now(), handedBy: staffName(user), cashCollected: cash });
+  await ref.update({ handedAt: Date.now(), handedBy: staffName(user), handedById: String(user.id), cashCollected: cash, cashPending: cash > 0 });
   if (o.telegramUserId) {
     await tg("sendMessage", {
       chat_id: o.telegramUserId,
@@ -2784,6 +2806,138 @@ async function handleComplaints(req, res, path, method) {
   return res.json(complaintView(id, (await ref.get()).data()));
 }
 
+// ---------- cash desk ("kassa") ----------
+// Cash taken by drivers (at hand-over) and by the shop (pickup orders) waits as `cashPending` on the
+// order until a cashier accepts it into the desk. Every movement of the desk is an immutable
+// `cashbook` entry; meta/cash keeps the running balance in the same transaction. Mistakes are fixed
+// with a counter-entry, never by editing history.
+
+const CASH_IN = { driver: "Haydovchidan", store: "Do'kon savdosi", other_in: "Boshqa kirim" };
+const CASH_OUT = {
+  purchase: "Zakup / tovar",
+  salary: "Maosh",
+  rent: "Ijara",
+  fuel: "Yoqilg'i / transport",
+  utility: "Kommunal / aloqa",
+  tax: "Soliq",
+  marketing: "Reklama",
+  bank: "Bankka topshirildi",
+  refund: "Mijozga qaytarildi",
+  other: "Boshqa chiqim",
+};
+// Bank deposits move money, refunds reduce revenue: neither is an operating expense.
+const NOT_EXPENSE = new Set(["bank", "refund"]);
+
+// Writes one ledger line and moves the balance; `t` already read the cash doc (`balance`).
+function bookCash(t, balance, entry) {
+  const amount = Math.round(entry.amount);
+  const next = balance + (entry.type === "in" ? amount : -amount);
+  if (next < 0) throw new HttpError(409, `Kassada yetarli pul yo'q: qoldiq ${formatSum(balance)}`);
+  const ref = cashbookCol.doc();
+  t.set(ref, { ...entry, amount, balanceAfter: next, at: entry.at ?? Date.now() });
+  t.set(cashRef, { balance: next, updatedAt: Date.now() }, { merge: true });
+  return { id: ref.id, next };
+}
+
+// Who holds a pending order's cash: the driver of its route, or the shop for pickups.
+const cashHolder = (o, routes) => (o.orderType === "pickup" ? "store" : (o.handedById ?? routes.get(o.routeId)?.driverId ?? "unknown"));
+
+async function pendingCash() {
+  const snap = await ordersCol.where("cashPending", "==", true).get();
+  const orders = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  const routeIds = [...new Set(orders.map((o) => o.routeId).filter(Boolean))];
+  const routeSnaps = routeIds.length ? await db.getAll(...routeIds.map((id) => routesCol.doc(id))) : [];
+  const routes = new Map(routeSnaps.filter((x) => x.exists).map((x) => [x.id, x.data()]));
+  const groups = new Map();
+  for (const o of orders) {
+    const key = cashHolder(o, routes);
+    const g = groups.get(key) ?? { holder: key, name: key === "store" ? "Do'kon / ombor" : (routes.get(o.routeId)?.driverName ?? o.handedBy ?? "—"), total: 0, orders: [] };
+    g.total += o.cashCollected;
+    g.orders.push({ id: o.id, number: o.number ?? null, name: o.name, amount: o.cashCollected, at: o.handedAt ?? o.shippedAt ?? o.createdAt, by: o.handedBy ?? o.cashBy ?? "" });
+    groups.set(key, g);
+  }
+  return { groups: [...groups.values()].sort((a, b) => b.total - a.total), routes };
+}
+
+async function handleCash(req, res, path, method) {
+  if (path === "/api/cash" && method === "GET") {
+    await requireRole(req, "admin");
+    const from = Number(req.query.from) || Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const [{ groups }, cash, entries] = await Promise.all([
+      pendingCash(),
+      cashRef.get(),
+      cashbookCol.where("at", ">=", from).orderBy("at", "desc").limit(2000).get(),
+    ]);
+    return res.json({
+      balance: cash.data()?.balance ?? 0,
+      pending: groups,
+      entries: entries.docs.map((d) => ({ id: d.id, ...d.data() })),
+      categories: { in: CASH_IN, out: CASH_OUT, notExpense: [...NOT_EXPENSE] },
+    });
+  }
+  if (path === "/api/cash/settle" && method === "POST") {
+    const { user } = await requireRole(req, "admin");
+    const body = req.body || {};
+    const ids = [...new Set((Array.isArray(body.orderIds) ? body.orderIds : []).map(String))].filter((id) => /^[\w-]{1,64}$/.test(id));
+    if (!ids.length) throw new HttpError(400, "Buyurtmalarni tanlang");
+    const received = Math.round(Number(body.received));
+    if (!(received >= 0)) throw new HttpError(400, "Qabul qilingan summani kiriting");
+    const note = String(body.note || "").trim().slice(0, 300);
+    const { routes } = await pendingCash();
+    const result = await db.runTransaction(async (t) => {
+      const [cash, ...snaps] = await t.getAll(cashRef, ...ids.map((id) => ordersCol.doc(id)));
+      const orders = snaps.map((x) => ({ id: x.id, ...x.data() }));
+      if (orders.some((o) => !o.cashPending)) throw new HttpError(409, "Ba'zi buyurtmalar puli allaqachon qabul qilingan, sahifani yangilang");
+      const holders = new Set(orders.map((o) => cashHolder(o, routes)));
+      if (holders.size !== 1) throw new HttpError(400, "Bir martada bitta odamning pulini qabul qiling");
+      const holder = [...holders][0];
+      const expected = orders.reduce((n, o) => n + o.cashCollected, 0);
+      if (received !== expected && !note) throw new HttpError(400, `Summa farq qiladi (kutilgan ${formatSum(expected)}): izohga sababini yozing`);
+      const name = holder === "store" ? "Do'kon / ombor" : (routes.get(orders[0].routeId)?.driverName ?? orders[0].handedBy ?? "—");
+      const entry = bookCash(t, cash.data()?.balance ?? 0, {
+        type: "in",
+        category: holder === "store" ? "store" : "driver",
+        holder,
+        holderName: name,
+        amount: received,
+        expected,
+        diff: received - expected,
+        orderIds: ids,
+        note,
+        by: staffName(user),
+      });
+      for (const o of orders) t.update(ordersCol.doc(o.id), { cashPending: false, cashSettledAt: Date.now(), cashSettlementId: entry.id });
+      return { holder, expected, count: orders.length, entry };
+    });
+    if (result.holder !== "store" && result.holder !== "unknown") {
+      const diff = received - result.expected;
+      await notifyDriver(
+        result.holder,
+        `✅ Kassaga ${formatSum(received)} qabul qilindi (${result.count} ta buyurtma).${diff ? `\n${diff < 0 ? "⚠️ Kamomad" : "Ortiqcha"}: ${formatSum(Math.abs(diff))}.` : ""}`,
+      );
+    }
+    return res.json({ ok: true, balance: result.entry.next });
+  }
+  if (path === "/api/cash/entries" && method === "POST") {
+    const { user } = await requireRole(req, "admin");
+    const body = req.body || {};
+    const type = body.type === "in" ? "in" : "out";
+    const cats = type === "in" ? { other_in: CASH_IN.other_in } : CASH_OUT;
+    const category = cats[body.category] ? body.category : null;
+    if (!category || category === "refund") throw new HttpError(400, "Kategoriyani tanlang");
+    const amount = Math.round(Number(body.amount));
+    if (!(amount > 0 && amount <= 10_000_000_000)) throw new HttpError(400, "Summani kiriting");
+    const note = String(body.note || "").trim().slice(0, 300);
+    if (!note) throw new HttpError(400, "Izoh yozing: nima uchun");
+    const next = await db.runTransaction(async (t) => {
+      const cash = await t.get(cashRef);
+      return bookCash(t, cash.data()?.balance ?? 0, { type, category, amount, note, by: staffName(user) }).next;
+    });
+    return res.json({ ok: true, balance: next });
+  }
+  return null;
+}
+
 async function handleLogistics(req, res, path, method) {
   if (path === "/api/vehicles" && method === "GET") {
     await requireRole(req, "admin");
@@ -2940,6 +3094,10 @@ async function route(req, res) {
 
   if (path === "/api/telegram" && method === "POST") return handleTelegramUpdate(req, res);
   if (path === "/api/driverbot" && method === "POST") return handleDriverBot(req, res);
+  if (path.startsWith("/api/cash")) {
+    const handled = await handleCash(req, res, path, method);
+    if (handled !== null) return handled;
+  }
   if (path.startsWith("/api/complaints") || /^\/api\/orders\/[\w-]+\/complaint$/.test(path)) {
     const handled = await handleComplaints(req, res, path, method);
     if (handled !== null) return handled;
@@ -2957,7 +3115,8 @@ async function route(req, res) {
 
   if (path === "/api/products" && method === "GET") {
     const staff = req.query.all === "1" && (await isStaffRequest(req));
-    return res.json(await listProducts({ staff }));
+    const admin = staff && (await authenticate(req)).role === "admin";
+    return res.json((await listProducts({ staff })).map((p) => (admin ? p : withoutCost(p))));
   }
 
   if (path === "/api/products/draft" && method === "POST") {
@@ -3019,7 +3178,8 @@ async function route(req, res) {
     if (method === "GET") {
       const snap = await ref.get();
       if (!snap.exists || (snap.data().draft && !(await isStaffRequest(req)))) throw new HttpError(404, "Mahsulot topilmadi");
-      return res.json({ id: snap.id, ...snap.data() });
+      const product = { id: snap.id, ...snap.data() };
+      return res.json((await authenticate(req)).role === "admin" ? product : withoutCost(product));
     }
     await requireRole(req, "admin");
     if (method === "PUT") {
@@ -3271,14 +3431,20 @@ async function route(req, res) {
     if (action === "refunded" && method === "POST") {
       const ref = ordersCol.doc(id);
       const o = await db.runTransaction(async (t) => {
-        const order = (await t.get(ref)).data();
+        const [snap, cash] = await t.getAll(ref, cashRef);
+        const order = snap.data();
         if (order?.refund?.status !== "pending") throw new HttpError(409, "Qaytariladigan to'lov yo'q");
         const refund = { ...order.refund, status: "done", doneAt: Date.now(), doneBy: by };
+        // Card refunds go back through the bank; cash ones are paid out of the desk.
+        if (order.payment === "cash") {
+          bookCash(t, cash.data()?.balance ?? 0, { type: "out", category: "refund", amount: refund.amount, orderIds: [id], note: `${ORDER_LABEL(order)} ${refund.reason ?? ""}`.trim(), by });
+        }
         t.update(ref, { refund });
         return { ...order, refund };
       });
       if (o.telegramUserId) {
-        await tg("sendMessage", { chat_id: o.telegramUserId, text: `💳 ${ORDER_LABEL(o)}: ${formatSum(o.refund.amount)} kartangizga qaytarildi.` }).catch(() => {});
+        const how = o.payment === "cash" ? "naqd qaytarildi" : "kartangizga qaytarildi";
+        await tg("sendMessage", { chat_id: o.telegramUserId, text: `💳 ${ORDER_LABEL(o)}: ${formatSum(o.refund.amount)} ${how}.` }).catch(() => {});
       }
       return res.json(orderDetail(id, o));
     }
