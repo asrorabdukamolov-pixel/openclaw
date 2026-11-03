@@ -494,6 +494,207 @@ async function checkKitParts(t, components) {
   if (bad) throw new HttpError(400, bad.exists ? `«${bad.data().name}» komplekt, uni modul qilib bo'lmaydi` : "Komplektdagi modul topilmadi");
 }
 
+// ---------- Excel import ----------
+// The panel parses the spreadsheet and posts plain rows; every rule lives here so a dry run and the
+// real import judge rows the same way. A row updates the product its ID, SKU or (failing both) exact
+// name points at, otherwise it creates one, so re-uploading an edited export never duplicates.
+// Products missing from the file are left alone: the import never deletes.
+const IMPORT_MAX_ROWS = 1000;
+const IMPORT_CHUNK = 100;
+const IMPORT_FIELDS = {
+  name: "nomi",
+  category: "bo'lim",
+  price: "narx",
+  oldPrice: "eski narx",
+  boxes: "qutilar",
+  size: "o'lcham",
+  material: "material",
+  description: "tavsif",
+  standalone: "alohida sotiladi",
+  isNew: "yangi belgisi",
+  draft: "qoralama",
+  whenShort: "modul yetishmasa",
+  leadDays: "tayyorlash kunlari",
+};
+
+const blank = (v) => v === undefined || v === null || String(v).trim() === "";
+const importText = (v) => (blank(v) ? undefined : String(v).trim());
+function importNumber(v, label) {
+  if (blank(v)) return undefined;
+  const n = Number(String(v).replace(/[\s ']/g, "").replace(",", "."));
+  if (!Number.isFinite(n)) throw new Error(`${label}: son emas («${v}»)`);
+  return n;
+}
+function importFlag(v, label) {
+  if (blank(v)) return undefined;
+  const t = String(v).trim().toLowerCase();
+  if (["ha", "xa", "yes", "true", "1", "+", "✓"].includes(t)) return true;
+  if (["yo'q", "yoq", "yo‘q", "no", "false", "0", "-"].includes(t)) return false;
+  throw new Error(`${label}: «ha» yoki «yo'q» yozing`);
+}
+const importCategory = (v) => {
+  const t = String(v ?? "").trim().toLowerCase();
+  return CATEGORIES.find((c) => c.id === t || c.name.toLowerCase() === t)?.id ?? t;
+};
+// "100003×2; Pastki shkaf 60 x 1" -> [{ ref, qty }]; a six-digit ref is a SKU, anything else a name.
+function importParts(v) {
+  return String(v ?? "")
+    .split(/[;\n]+/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => {
+      const m = /^(.*?)(?:\s*[x×*]\s*(\d+))?$/i.exec(p);
+      return { ref: m[1].trim(), qty: m[2] ? Number(m[2]) : 1 };
+    });
+}
+
+async function importProducts(rows, { apply, actor }) {
+  if (!Array.isArray(rows) || !rows.length) throw new HttpError(400, "Faylda mahsulot qatorlari yo'q");
+  if (rows.length > IMPORT_MAX_ROWS) throw new HttpError(400, `Bir martada ${IMPORT_MAX_ROWS} qatordan ko'p bo'lmasin`);
+  const all = (await productsCol.get()).docs.map((d) => ({ id: d.id, ...d.data() }));
+  const byId = new Map(all.map((p) => [p.id, p]));
+  const bySku = new Map(all.filter((p) => p.sku != null).map((p) => [String(p.sku), p]));
+  const nameKey = (kind, name) => `${kind}:${String(name).trim().toLowerCase()}`;
+  const byName = new Map(all.map((p) => [nameKey(p.kind ?? "item", p.name), p]));
+
+  // Pass 1: match each row to a product and collect its fields; kits resolve their modules after
+  // every row is known, so a kit may use modules created by the same file.
+  const plan = [];
+  const seenNames = new Set();
+  const seenIds = new Set();
+  for (const raw of rows) {
+    const line = Number(raw.line) || plan.length + 2;
+    const errors = [];
+    const kind = /komplekt|kit/i.test(String(raw.kind ?? "")) ? "kit" : "item";
+    let existing = null;
+    if (!blank(raw.id)) {
+      existing = byId.get(String(raw.id).trim()) ?? null;
+      if (!existing) errors.push(`ID «${raw.id}» bazada yo'q`);
+    } else if (!blank(raw.sku)) {
+      existing = bySku.get(String(raw.sku).trim()) ?? null;
+      if (!existing) errors.push(`SKU ${raw.sku} bazada yo'q. Yangi mahsulot uchun SKU ni bo'sh qoldiring`);
+    } else if (!blank(raw.name)) {
+      existing = byName.get(nameKey(kind, raw.name)) ?? null;
+    }
+    if (existing && (existing.kind ?? "item") !== kind) errors.push("Turini o'zgartirib bo'lmaydi (mahsulot ↔ komplekt)");
+    if (existing && seenIds.has(existing.id)) errors.push("Bu mahsulot faylda ikki marta bor");
+    if (existing) seenIds.add(existing.id);
+    const name = importText(raw.name) ?? existing?.name;
+    if (name) {
+      const key = nameKey(kind, name);
+      if (seenNames.has(key)) errors.push(`«${name}» nomi faylda ikki marta bor`);
+      seenNames.add(key);
+      const owner = byName.get(key);
+      if (owner && existing && owner.id !== existing.id) errors.push(`«${name}» nomli boshqa mahsulot bor (SKU ${owner.sku ?? "—"})`);
+    }
+    const input = { kind };
+    let stock;
+    try {
+      for (const [field, label] of Object.entries(IMPORT_FIELDS)) {
+        const v = raw[field];
+        if (["price", "oldPrice", "boxes", "leadDays"].includes(field)) input[field] = importNumber(v, label);
+        else if (["standalone", "isNew", "draft"].includes(field)) input[field] = importFlag(v, label);
+        else if (field === "category") input[field] = blank(v) ? undefined : importCategory(v);
+        else if (field === "whenShort") input[field] = blank(v) ? undefined : /yash|hide/i.test(String(v)) ? "hide" : "preorder";
+        else input[field] = importText(v);
+      }
+      // An emptied "Eski narx" cell clears the old price on an update.
+      if (existing && blank(raw.oldPrice) && raw.oldPrice !== undefined) input.oldPrice = 0;
+      stock = importNumber(raw.stock, "qoldiq");
+      if (stock !== undefined && kind === "kit") stock = undefined;
+      if (stock !== undefined && !(Number.isInteger(stock) && stock >= 0 && stock <= 100000)) throw new Error("qoldiq: 0 dan katta butun son bo'lsin");
+    } catch (err) {
+      errors.push(err.message);
+    }
+    const parts = kind === "kit" && !blank(raw.components) ? importParts(raw.components) : null;
+    if (kind === "kit" && !existing && !parts) errors.push("Komplekt tarkibi yozilmagan");
+    plan.push({ line, kind, existing, input, stock, parts, errors, id: existing?.id ?? productsCol.doc().id });
+  }
+
+  // Pass 2: resolve kit modules, then validate every row with the same rules as the panel form.
+  const itemsByName = new Map(plan.filter((r) => r.kind === "item").map((r) => [String(r.input.name ?? r.existing?.name ?? "").toLowerCase(), r.id]));
+  for (const p of all) if ((p.kind ?? "item") === "item" && !itemsByName.has(p.name.toLowerCase())) itemsByName.set(p.name.toLowerCase(), p.id);
+  for (const r of plan) {
+    if (r.parts) {
+      r.input.components = r.parts.map(({ ref, qty }) => {
+        const id = /^\d{6}$/.test(ref) ? bySku.get(ref)?.id : itemsByName.get(ref.toLowerCase());
+        if (!id || byId.get(id)?.kind === "kit") r.errors.push(`Modul topilmadi: «${ref}»`);
+        return { id: id ?? "-", qty };
+      });
+    }
+    if (r.errors.length) continue;
+    try {
+      r.next = cleanProduct(r.input, r.existing ?? {});
+    } catch (err) {
+      r.errors.push(err.message);
+      continue;
+    }
+    r.changes = [];
+    if (r.existing) {
+      // Compare against the stored product as the form would save it, so fields older products
+      // never had (defaults) do not show up as changes.
+      let base = r.existing;
+      try {
+        base = cleanProduct({}, r.existing);
+      } catch {
+        // A warehouse draft without a price cannot pass the form rules; compare it as stored.
+      }
+      const show = (v) => (v === true ? "ha" : v === false ? "yo'q" : v ?? "—");
+      for (const [field, label] of Object.entries(IMPORT_FIELDS)) {
+        const before = base[field] ?? null;
+        const after = r.next[field] ?? null;
+        if (r.kind === "item" && ["whenShort", "leadDays"].includes(field)) continue;
+        if (r.kind === "kit" && ["boxes", "standalone"].includes(field)) continue;
+        if (JSON.stringify(before) !== JSON.stringify(after)) r.changes.push(`${label}: ${show(before)} → ${show(after)}`);
+      }
+      if (r.kind === "kit" && JSON.stringify(r.existing.components) !== JSON.stringify(r.next.components)) r.changes.push("komplekt tarkibi");
+    }
+    if (r.stock !== undefined && r.stock !== (r.existing?.stock ?? 0)) r.changes.push(`qoldiq: ${r.existing?.stock ?? 0} → ${r.stock}`);
+  }
+
+  const action = (r) => (r.errors.length ? "error" : !r.existing ? "create" : r.changes.length ? "update" : "same");
+  const report = plan.map((r) => ({
+    line: r.line,
+    action: action(r),
+    kind: r.kind,
+    name: r.next?.name ?? r.input.name ?? r.existing?.name ?? "",
+    sku: r.existing?.sku ?? null,
+    errors: r.errors,
+    changes: r.changes ?? [],
+  }));
+  const counts = Object.fromEntries(["create", "update", "same", "error"].map((a) => [a, report.filter((r) => r.action === a).length]));
+  if (!apply) return { counts, rows: report };
+  if (counts.error) throw new HttpError(400, `Faylda ${counts.error} ta xato bor: avval tuzating`);
+
+  // Items before kits: a kit's new modules must exist before the kit points at them.
+  const work = plan.filter((r) => action(r) === "create" || action(r) === "update").sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "item" ? -1 : 1));
+  for (let i = 0; i < work.length; i += IMPORT_CHUNK) {
+    const chunk = work.slice(i, i + IMPORT_CHUNK);
+    await db.runTransaction(async (t) => {
+      const refs = chunk.map((r) => productsCol.doc(r.id));
+      const [counterSnap, ...snaps] = await t.getAll(countersRef, ...refs);
+      let sku = counterSnap.data()?.sku ?? FIRST_SKU;
+      chunk.forEach((r, k) => {
+        const ref = refs[k];
+        const fresh = snaps[k].exists ? snaps[k].data() : null;
+        const product = { ...r.next };
+        if (fresh) {
+          product.stock = fresh.stock ?? 0;
+          t.update(ref, product);
+        } else {
+          if (product.kind === "item") product.sku = ++sku;
+          t.set(ref, { ...product, createdBy: actor });
+        }
+        if (r.stock === undefined || product.kind === "kit") return;
+        const delta = r.stock - product.stock;
+        if (delta) moveStock(t, ref, product, delta > 0 ? "in" : "out", Math.abs(delta), "Excel import", actor);
+      });
+      t.set(countersRef, { sku }, { merge: true });
+    });
+  }
+  return { counts, rows: report };
+}
+
 // Staff (admin, omborchi) and paired warehouse screens see drafts; buyers never do.
 async function isStaffRequest(req) {
   if (await screenFromToken(req)) return true;
@@ -1628,6 +1829,12 @@ async function route(req, res) {
       }).catch((err) => logger.warn("draft notice failed", err));
     }
     return res.status(201).json({ id: ref.id, ...product });
+  }
+
+  if (path === "/api/products/import" && method === "POST") {
+    const { user } = await requireRole(req, "admin");
+    const body = req.body || {};
+    return res.json(await importProducts(body.rows, { apply: body.apply === true, actor: staffName(user) }));
   }
 
   if (path === "/api/stock/scan" && method === "POST") {

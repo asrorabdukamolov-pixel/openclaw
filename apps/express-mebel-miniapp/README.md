@@ -209,6 +209,21 @@ Mahsulot uch darajada: **quti** (shtrix-kod `EM<SKU>-<quti>`) → **modul / mahs
 - Buyurtmada har bir modul band qilinadi; ombor ekranida karta komplekt nomini, terish oynasi esa barcha modul va qutilarni ko'rsatadi.
 - Komplektga qo'lda kirim/chiqim qilinmaydi (modullarni kirim qiling); komplektda turgan modulni o'chirib bo'lmaydi.
 
+## Mahsulotlarni Excel orqali kiritish
+
+Panel → **Mahsulotlar (SKU)**:
+
+1. **⬇️ Excel** — joriy katalogni `.xlsx` qilib yuklab beradi. Bu fayl shablon ham: "Yo'riqnoma" varag'ida har bir ustun tushuntirilgan.
+2. Excel'da tahrirlang: narx, qoldiq, tavsifni o'zgartiring, pastga yangi qatorlar qo'shing (ID va SKU bo'sh qoladi).
+3. **⬆️ Exceldan yuklash** — tizim avval tekshiradi va hisobot ko'rsatadi: nechta yangi, nechtasi yangilanadi, qaysi qatorda xato bor.
+   Xato bor paytda hech narsa saqlanmaydi. Hammasi to'g'ri bo'lsa, **Tasdiqlash** bosiladi.
+
+Qoidalar:
+- Qator mahsulotni **ID**, **SKU** yoki aynan **nomi** bo'yicha topadi va yangilaydi, topilmasa yangisini qo'shadi. Shuning uchun bir faylni qayta yuklash dubl yaratmaydi.
+- Faylda yo'q mahsulotlar o'chirilmaydi. Rasmlar Excel'dan emas, panelda mahsulotning o'zidan yuklanadi.
+- **Qoldiq** o'zgarsa, ombor jurnaliga "Excel import" kirim/chiqim bo'lib yoziladi.
+- Komplekt tarkibi: `100003×2; 100004×1`. SKU o'rniga modul nomi ham bo'ladi, shu faylda yangi qo'shilgan modul ham.
+
 ## Omborchini qo'shish
 
 1. Admin: ☰ → **👥 Xodimlar** → **＋ Omborchini taklif qilish** → **📤 Yuborish** (yoki nusxalab, omborchiga jo'nating).

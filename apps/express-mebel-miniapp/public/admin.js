@@ -356,13 +356,135 @@ function openOrder(id) {
   });
 }
 
+// ---------- Excel: the catalog export doubles as the import template ----------
+// Columns are matched by header text, so their order may change. The server decides everything:
+// the panel only turns the sheet into rows and shows the dry-run report before the real import.
+const XLSX_SRC = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+const XLS_COLUMNS = [
+  ["id", "ID", "Bazadagi raqami. Yangi mahsulotda bo'sh qoldiring, bor mahsulotda o'zgartirmang."],
+  ["sku", "SKU", "Shtrix-kod raqami. Yangi mahsulotga tizim o'zi beradi; komplektda bo'lmaydi."],
+  ["kind", "Turi", "«Mahsulot» yoki «Komplekt». Mavjud mahsulotning turi o'zgarmaydi."],
+  ["name", "Nomi", "Majburiy. Bir xil nom ikki marta bo'lmasin."],
+  ["category", "Bo'lim", "Oshxona, Shkaf, Tumba, Parta, Pufik yoki Krovat."],
+  ["price", "Narx", "So'mda. Saytda ko'rinadigan mahsulot uchun majburiy."],
+  ["oldPrice", "Eski narx", "Chegirma uchun: narxdan katta bo'lsin. Bo'sh = chegirma yo'q."],
+  ["stock", "Qoldiq", "Ombordagi soni. O'zgarsa, ombor jurnaliga «Excel import» bo'lib yoziladi. Komplektda yozilmaydi."],
+  ["boxes", "Qutilar soni", "Bitta mahsulot nechta qutida (har qutiga alohida yorliq)."],
+  ["size", "O'lcham", "Masalan: 120×60×75 sm"],
+  ["material", "Material", "Masalan: LDSP 16 mm"],
+  ["description", "Tavsif", "Mijoz ko'radigan matn."],
+  ["standalone", "Alohida sotiladi", "«ha» yoki «yo'q». «yo'q» = faqat komplekt ichida ishlatiladigan modul."],
+  ["isNew", "Yangi belgisi", "«ha» yoki «yo'q»"],
+  ["draft", "Qoralama", "«ha» = saytda ko'rinmaydi."],
+  ["components", "Komplekt tarkibi", "Faqat komplekt uchun: SKU×soni, nuqta-vergul bilan. Masalan: 100003×2; 100004×1. SKU o'rniga modul nomi ham bo'ladi."],
+  ["whenShort", "Modul yetishmasa", "Komplekt uchun: «buyurtma» (oldindan buyurtma) yoki «yashirish»."],
+  ["leadDays", "Tayyorlash kunlari", "Komplekt oldindan buyurtmada necha kunda tayyor bo'ladi."],
+];
+const XLS_ACTION = { create: ["Yangi", "ok"], update: ["Yangilanadi", "teal"], same: ["O'zgarishsiz", ""], error: ["Xato", "bad"] };
+let xlsxReady;
+const loadXlsx = () =>
+  (xlsxReady ??= new Promise((resolve, reject) => {
+    const el = Object.assign(document.createElement("script"), { src: XLSX_SRC, onload: () => resolve(window.XLSX) });
+    el.onerror = () => {
+      xlsxReady = null;
+      reject(new Error("Excel kutubxonasi yuklanmadi: internetni tekshiring"));
+    };
+    document.head.append(el);
+  }));
+const yesNo = (v) => (v ? "ha" : "yo'q");
+
+async function exportCatalog() {
+  const XLSX = await loadXlsx();
+  await refreshProducts();
+  const rows = state.products.map((p) => {
+    const kit = isKit(p);
+    const cells = {
+      id: p.id, sku: kit ? "" : p.sku ?? "", kind: kit ? "Komplekt" : "Mahsulot", name: p.name, category: catName(p.category),
+      price: p.price, oldPrice: p.oldPrice ?? "", stock: kit ? "" : p.stock, boxes: kit ? "" : p.boxes ?? 1,
+      size: p.size ?? "", material: p.material ?? "", description: p.description ?? "",
+      standalone: kit ? "" : yesNo(p.standalone !== false), isNew: yesNo(p.isNew), draft: yesNo(p.draft),
+      components: kit ? p.parts.map((c) => `${c.sku ?? c.name}×${c.qty}`).join("; ") : "",
+      whenShort: kit ? (p.whenShort === "hide" ? "yashirish" : "buyurtma") : "", leadDays: kit ? p.leadDays ?? "" : "",
+    };
+    return XLS_COLUMNS.map(([key]) => cells[key]);
+  });
+  const sheet = XLSX.utils.aoa_to_sheet([XLS_COLUMNS.map(([, label]) => label), ...rows]);
+  sheet["!cols"] = XLS_COLUMNS.map(([key]) => ({ wch: { name: 34, description: 40, components: 34, id: 22 }[key] ?? 13 }));
+  const help = XLSX.utils.aoa_to_sheet([["Ustun", "Nima yoziladi"], ...XLS_COLUMNS.map(([, label, text]) => [label, text]),
+    [], ["Qoida", "Fayldagi har bir qator: ID, SKU yoki nomi bo'yicha topilgan mahsulotni yangilaydi, topilmasa yangisini qo'shadi. Faylda yo'q mahsulotlar o'chirilmaydi. Rasmlar panelda alohida yuklanadi."]]);
+  help["!cols"] = [{ wch: 20 }, { wch: 110 }];
+  const book = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(book, sheet, "Mahsulotlar");
+  XLSX.utils.book_append_sheet(book, help, "Yo'riqnoma");
+  XLSX.writeFile(book, `katalog-${dayKey(Date.now())}.xlsx`);
+}
+
+async function readSheetRows(file) {
+  const XLSX = await loadXlsx();
+  const book = XLSX.read(await file.arrayBuffer());
+  const sheet = book.Sheets["Mahsulotlar"] ?? book.Sheets[book.SheetNames[0]];
+  const grid = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: true });
+  const norm = (t) => String(t).trim().toLowerCase().replace(/[‘’`ʻʼ]/g, "'");
+  const head = (grid[0] ?? []).map(norm);
+  const index = XLS_COLUMNS.map(([key, label]) => [key, head.indexOf(norm(label))]).filter(([, i]) => i >= 0);
+  if (!index.some(([key]) => key === "name")) throw new Error("Birinchi qatorda «Nomi» ustuni topilmadi. Shablonni «⬇️ Excel» tugmasidan oling.");
+  return grid
+    .map((cells, i) => ({ cells, line: i + 1 }))
+    .slice(1)
+    .filter(({ cells }) => cells.some((c) => String(c).trim() !== ""))
+    .map(({ cells, line }) => Object.fromEntries([["line", line], ...index.map(([key, i]) => [key, cells[i]])]));
+}
+
+async function importCatalog() {
+  const input = Object.assign(document.createElement("input"), { type: "file", accept: ".xlsx,.xls,.csv" });
+  input.onchange = async () => {
+    const file = input.files[0];
+    if (!file) return;
+    try {
+      const rows = await readSheetRows(file);
+      const report = await api("/api/products/import", { method: "POST", body: { rows } });
+      showImportReport(file.name, rows, report);
+    } catch (err) {
+      toast(err.message);
+    }
+  };
+  input.click();
+}
+
+function showImportReport(fileName, rows, report) {
+  const { counts } = report;
+  const shown = report.rows.filter((r) => r.action !== "same");
+  openDrawer(`Excel: ${fileName}`, (body) => {
+    body.innerHTML = `
+      <div class="seg" style="margin-bottom:14px">${Object.entries(XLS_ACTION).map(([k, [label]]) => `<button type="button" disabled>${label}: ${counts[k]}</button>`).join("")}</div>
+      ${counts.error ? `<p class="note">⚠️ ${counts.error} ta qatorda xato bor. Excel'da tuzatib, faylni qayta yuklang: xato bor paytda hech narsa saqlanmaydi.</p>` : ""}
+      <ul class="list">${shown.map((r) => `<li><span><b>${r.line}-qator</b> · ${esc(r.name || "—")}${r.sku ? ` <span class="muted">SKU ${r.sku}</span>` : ""}<br><span class="${r.errors.length ? "" : "muted"}">${esc((r.errors.length ? r.errors : r.changes).join(" · ") || (r.action === "create" ? (r.kind === "kit" ? "yangi komplekt" : "yangi mahsulot") : ""))}</span></span><span>${pill(XLS_ACTION[r.action])}</span></li>`).join("") || '<li><span class="muted">Hech narsa o\'zgarmaydi</span></li>'}</ul>
+      <button class="btn" type="button" id="importGo" style="margin-top:16px" ${counts.error || !(counts.create + counts.update) ? "disabled" : ""}>Tasdiqlash: ${counts.create} ta yangi, ${counts.update} ta yangilanadi</button>`;
+    $("#importGo").onclick = async (e) => {
+      e.target.disabled = true;
+      try {
+        await api("/api/products/import", { method: "POST", body: { rows, apply: true } });
+        await refreshProducts();
+        toast("Katalog yangilandi");
+        closeDrawer();
+        render();
+      } catch (err) {
+        e.target.disabled = false;
+        toast(err.message);
+      }
+    };
+  });
+}
+
 views.products = async (page, tools) => {
   let query = "";
   let kind = "all";
-  tools.innerHTML = `<button class="btn" type="button" data-new="item">＋ Mahsulot / modul</button><button class="btn btn--dark" type="button" data-new="kit">＋ Komplekt</button>`;
+  tools.innerHTML = `<button class="btn btn--ghost" type="button" data-xls="export">⬇️ Excel</button><button class="btn btn--ghost" type="button" data-xls="import">⬆️ Exceldan yuklash</button><button class="btn" type="button" data-new="item">＋ Mahsulot / modul</button><button class="btn btn--dark" type="button" data-new="kit">＋ Komplekt</button>`;
   tools.onclick = (e) => {
     const n = e.target.closest("[data-new]");
     if (n) productForm(null, n.dataset.new);
+    const x = e.target.closest("[data-xls]");
+    if (x) (x.dataset.xls === "export" ? exportCatalog() : importCatalog()).catch((err) => toast(err.message));
   };
   const statusPill = (p) => (p.draft ? pill(["Qoralama", "warn"]) : p.listed ? pill(["Saytda", "ok"]) : pill(["Saytda yo'q", ""]));
   const draw = () => {
