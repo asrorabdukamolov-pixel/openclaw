@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="uz">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Express Market — Boshqaruv paneli</title>
+    <link rel="icon" href="/img/mark.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&family=Prompt:ital,wght@1,600;1,700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/admin.css" />
+  </head>
+  <body>
+    <section class="login" id="loginView" hidden>
+      <div class="login-card">
+        <img class="brand" src="/img/logo-dark.webp" alt="Express Market" />
+        <h1>Boshqaruv paneli</h1>
+        <p id="loginText">Kirish uchun Telegram'da Express Market botiga <b>/panel</b> deb yozing yoki mini ilovada
+          ☰ → <b>💻 Kompyuterda ochish</b> ni bosing. Kelgan havolani shu kompyuterda oching.</p>
+        <p class="error" id="loginError" hidden></p>
+      </div>
+    </section>
+
+    <div class="shell" id="appView" hidden>
+      <aside class="side">
+        <img class="brand brand--side" src="/img/logo-light.webp" alt="Express Market" />
+        <nav id="nav">
+          <a href="#dashboard" data-route="dashboard">📊 Dashboard</a>
+          <a href="#orders" data-route="orders">🧾 Savdo va buyurtmalar</a>
+          <a href="#crm" data-route="crm">🤝 CRM: mijozlar</a>
+          <a href="#logistics" data-route="logistics">🚚 Logistika</a>
+          <a href="#complaints" data-route="complaints">🛠 Shikoyatlar</a>
+          <a href="#masters" data-route="masters">🔧 Ustalar</a>
+          <a href="#products" data-route="products">🏷 Mahsulotlar (SKU)</a>
+          <a href="#stock" data-route="stock">📦 Ombor</a>
+          <a href="#purchases" data-route="purchases">🏭 Zakup</a>
+          <a href="#finance" data-route="finance">💰 Moliya</a>
+          <a href="#cash" data-route="cash">💵 Kassa</a>
+          <a href="#accounting" data-route="accounting">📒 Buxgalteriya</a>
+          <a href="#marketing" data-route="marketing">📣 Marketing</a>
+          <a href="#staff" data-route="staff">👥 Xodimlar (HR)</a>
+          <a href="#settings" data-route="settings">⚙️ Sozlamalar</a>
+        </nav>
+        <div class="side-foot"><span id="whoami"></span><button id="logoutBtn" type="button">Chiqish</button></div>
+      </aside>
+      <main class="main">
+        <header class="top">
+          <h1 id="pageTitle">Dashboard</h1>
+          <div class="top-tools" id="topTools"></div>
+        </header>
+        <div id="page"></div>
+      </main>
+    </div>
+
+    <aside class="drawer" id="drawer" hidden>
+      <div class="drawer-head"><h2 id="drawerTitle"></h2><button type="button" id="drawerClose" aria-label="Yopish">✕</button></div>
+      <div class="drawer-body" id="drawerBody"></div>
+    </aside>
+    <div class="veil" id="veil" hidden></div>
+    <div class="toast" id="toast" hidden></div>
+
+    <script src="/admin.js" type="module"></script>
+  </body>
+</html>
