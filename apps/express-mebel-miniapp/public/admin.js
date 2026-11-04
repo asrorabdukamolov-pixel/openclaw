@@ -1870,26 +1870,6 @@ function applicationDrawer(a) {
   });
 }
 
-function driverDrawer(m) {
-  openDrawer(m.name, (body) => {
-    body.innerHTML = `${m.photos ? docPhotos(m.photos) : ""}
-      <dl class="specs" style="margin-top:14px"><dt>Telefon</dt><dd>${esc(m.phone || "—")}${m.username ? ` · @${esc(m.username)}` : ""}</dd><dt>Holat</dt><dd>${esc(DRIVER_TRUST(m))}</dd><dt>Qo'shilgan</dt><dd>${when(m.addedAt)}${m.approvedBy ? ` · ${esc(m.approvedBy)}` : ""}</dd></dl>
-      <form id="trustForm">${trustFields(m)}</form>
-      <button class="btn" type="button" id="trustSave" style="margin-top:12px">Saqlash</button>`;
-    const trust = bindTrust($("#trustForm", body));
-    $("#trustSave", body).onclick = async () => {
-      try {
-        await api(`/api/staff/${m.id}/trust`, { method: "PUT", body: trust() });
-        toast("Saqlandi");
-        closeDrawer();
-        render();
-      } catch (err) {
-        toast(err.message);
-      }
-    };
-  });
-}
-
 // ---------- HR: payroll, attendance, payments ----------
 let hrMonth = null;
 const PAY_TYPES = { advance: "Avans", salary: "Oylik", bonus: "Bonus" };
@@ -2012,9 +1992,34 @@ function payForm(row) {
     <button class="btn" type="button" id="pGo">Berildi deb yozish</button>`;
 }
 
+// Removing someone's access (driver or warehouse) logs them out of the bots; pay history stays.
+const removeButton = (m) => `<button class="btn btn--ghost" type="button" id="accessRemove" style="margin-top:16px;color:#c0392b">🗑 Kirish ruxsatini olib tashlash</button>`;
+function bindRemove(body, m) {
+  $("#accessRemove", body).onclick = async () => {
+    if (!window.confirm(`«${m.name}» o'chirilsinmi? Botlarga kirishi yopiladi, to'lov tarixi qoladi.`)) return;
+    try {
+      await api(`/api/staff/${m.id}`, { method: "DELETE" });
+      toast("O'chirildi");
+      closeDrawer();
+      render();
+    } catch (err) {
+      toast(err.message);
+    }
+  };
+}
+
 async function personDrawer(row) {
   if (row.kind === "master") {
     location.hash = "#masters";
+    return;
+  }
+  if (row.kind === "warehouse") {
+    const m = row.staff;
+    openDrawer(m.name, (body) => {
+      body.innerHTML = `<dl class="specs"><dt>Rol</dt><dd>Omborchi</dd><dt>Telegram</dt><dd>${m.username ? `@${esc(m.username)}` : "—"}</dd><dt>Qo'shilgan</dt><dd>${when(m.addedAt)}</dd></dl>
+        <p class="muted" style="margin-top:10px">Omborchi kirish ruxsati: buyurtmalarni yig'ish va ombor ekrani. Oylik to'lansa, uni «＋ Xodim (oylikli)» sifatida ham qo'shing.</p>${removeButton(m)}`;
+      bindRemove(body, m);
+    });
     return;
   }
   openDrawer(row.name, async (body) => {
@@ -2066,7 +2071,9 @@ async function personDrawer(row) {
       const car = d.vehicle;
       const cp = car?.photos ?? {};
       body.innerHTML = `${photoHead(`drv:${pr.id}`, pr.photo ?? pr.photos?.withCar)}${head}
-        <dl class="specs" style="margin-top:12px"><dt>Telefon</dt><dd>${esc(pr.phone || "—")}${pr.username ? ` · @${esc(pr.username)}` : ""}</dd><dt>Ish turi</dt><dd>${esc(DRIVER_TRUST(pr))}</dd>${pr.rating ? `<dt>Baho</dt><dd>⭐ ${pr.rating} (${pr.ratingCount})</dd>` : ""}</dl>
+        <dl class="specs" style="margin-top:12px"><dt>Telefon</dt><dd>${esc(pr.phone || "—")}${pr.username ? ` · @${esc(pr.username)}` : ""}</dd><dt>Qo'shilgan</dt><dd>${when(pr.addedAt)}${pr.approvedBy ? ` · ${esc(pr.approvedBy)}` : ""}</dd>${pr.rating ? `<dt>Baho</dt><dd>⭐ ${pr.rating} (${pr.ratingCount})</dd>` : ""}</dl>
+        <form id="trustForm">${trustFields(pr)}</form>
+        <button class="btn btn--ghost" type="button" id="trustSave" style="margin-top:8px">Ish turini saqlash</button>
         ${filesBlock(`drv:${pr.id}`, "📁 Haydovchi hujjatlari", [["Mashina oldida", pr.photos?.withCar], ["Pasport", pr.photos?.passport], ["Prava", pr.photos?.license]], pr.docs ?? [])}
         <h3 style="margin:16px 0 8px">🚐 Mashina</h3>
         ${car ? `<p><b>${esc(car.name)}</b> ${esc(car.plate)} · ${car.capacityKg ? kg(car.capacityKg) : "sig'imi kiritilmagan"}${car.capacityBoxes ? ` · ${car.capacityBoxes} quti` : ""}</p>` : '<p class="muted">Mashina biriktirilmagan</p>'}
@@ -2077,8 +2084,19 @@ async function personDrawer(row) {
           d.deliveries.map((o) => `<tr><td>${when(o.at)}</td><td>#${o.number} ${esc(o.name)}</td><td class="num">${o.km ?? "—"}</td><td class="num">${sum(o.fee)}</td><td class="num"><b>${sum(o.pay)}</b></td><td>${o.rating ? "⭐".repeat(o.rating) : "—"}</td></tr>`).join("") || '<tr><td colspan="6" class="empty">Bu oy yetkazish yo\'q</td></tr>'
         }</tbody></table></div>
         <h3 style="margin:16px 0 8px">📸 Reklama hisobotlari</h3><ul class="list">${d.ads.map((r) => `<li><span>${r.month}</span>${pill(r.status === "approved" ? [`+${sum(r.amount)}`, "ok"] : r.status === "pending" ? ["Ko'rib chiqilmoqda", "warn"] : r.status === "rejected" ? ["Rad etilgan", "bad"] : ["Yuborilmagan", ""])}</li>`).join("") || '<li class="muted">Hali yo\'q</li>'}</ul>
-        ${payForm(row)}${payments}`;
+        ${payForm(row)}${payments}${removeButton(pr)}`;
       bindFiles(body, reopen);
+      bindRemove(body, pr);
+      const trust = bindTrust($("#trustForm", body));
+      $("#trustSave", body).onclick = async () => {
+        try {
+          await api(`/api/staff/${pr.id}/trust`, { method: "PUT", body: trust() });
+          toast("Saqlandi");
+          reopen();
+        } catch (err) {
+          toast(err.message);
+        }
+      };
       $("#carSave", body).onclick = async () => {
         const vehicleId = $("#carPick", body).value;
         try {
@@ -2130,6 +2148,12 @@ views.staff = async (page, tools) => {
   const months = Array.from({ length: 4 }, (_, i) => { const d = new Date(Date.now() + 5 * 3600e3); d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth() - i); return d.toISOString().slice(0, 7); });
   tools.innerHTML = `<select class="input" id="hrMonth" style="width:auto">${months.map((m) => `<option ${m === hrMonth ? "selected" : ""}>${m}</option>`).join("")}</select><button class="btn" type="button" id="newEmp">＋ Xodim (oylikli)</button><button class="btn btn--ghost" type="button" data-invite="warehouse">＋ Omborchi</button><button class="btn btn--ghost" type="button" data-invite="driver">＋ Haydovchi</button>`;
   const [staff, screens, apps, masterApps, pay, ads] = await Promise.all([api("/api/staff"), api("/api/screens"), api("/api/driver-applications"), api("/api/master-applications"), api(`/api/hr/summary?month=${hrMonth}`), api("/api/hr/ad-reports")]);
+  // One people table: payroll rows plus warehouse staff, who have access but no pay of their own.
+  const access = new Map(staff.map((m) => [`drv:${m.id}`, m]));
+  const rows = [
+    ...pay.rows.filter((r) => r.active || r.accrued || r.paid),
+    ...staff.filter((m) => m.role !== "driver").map((m) => ({ key: `wh:${m.id}`, kind: "warehouse", name: m.name, photo: null, position: "Omborchi", work: `qo'shilgan ${when(m.addedAt)}`, staff: m })),
+  ];
   const totals = pay.rows.reduce((t, r) => ({ accrued: t.accrued + r.accrued + r.bonus, paid: t.paid + r.paid, balance: t.balance + r.balance }), { accrued: 0, paid: 0, balance: 0 });
   page.innerHTML = `
     <div class="grid cols-4">
@@ -2144,12 +2168,16 @@ views.staff = async (page, tools) => {
         : ""
     }
     <div class="table-wrap" style="margin-top:16px"><table><thead><tr><th></th><th>Xodim</th><th>Lavozim</th><th>Ishlagan</th><th class="num">Hisoblangan</th><th class="num">Bonus</th><th class="num">Berilgan</th><th class="num">Berilishi kerak</th></tr></thead><tbody>${
-      pay.rows
-        .filter((r) => r.active || r.accrued || r.paid)
-        .map((r) => `<tr class="click" data-person="${esc(r.key)}"><td>${avatar(r)}</td><td><b>${esc(r.name)}</b>${r.kind === "employee" && !r.linked ? '<br><span class="muted">⚠️ Telegram ulanmagan</span>' : ""}${r.vehicle ? `<br><span class="muted">🚐 ${esc(r.vehicle)}</span>` : ""}</td><td>${esc(r.position)}${r.detail?.schedule ? `<br><span class="muted">${esc(r.detail.schedule)}</span>` : ""}</td><td>${esc(r.work)}</td><td class="num">${sum(r.accrued)}</td><td class="num">${r.bonus ? sum(r.bonus) : "—"}</td><td class="num">${r.paid ? sum(r.paid) : "—"}</td><td class="num">${balanceCell(r.balance)}</td></tr>`)
+      rows
+        .map((r) => {
+          const m = r.staff ?? access.get(r.key);
+          const sub = r.kind === "driver" && m ? (m.cashAllowed ? "💵 naqd ruxsat" : "faqat onlayn to'lov") : r.detail?.schedule;
+          const money = r.kind === "warehouse" ? '<td class="num muted" colspan="4">kirish ruxsati · oyliksiz</td>' : `<td class="num">${sum(r.accrued)}</td><td class="num">${r.bonus ? sum(r.bonus) : "—"}</td><td class="num">${r.paid ? sum(r.paid) : "—"}</td><td class="num">${balanceCell(r.balance)}</td>`;
+          return `<tr class="click" data-person="${esc(r.key)}"><td>${avatar(r)}</td><td><b>${esc(r.name)}</b>${m?.username ? ` <span class="muted">@${esc(m.username)}</span>` : ""}${r.kind === "employee" && !r.linked ? '<br><span class="muted">⚠️ Telegram ulanmagan</span>' : ""}${r.vehicle ? `<br><span class="muted">🚐 ${esc(r.vehicle)}</span>` : ""}</td><td>${esc(r.position)}${sub ? `<br><span class="muted">${esc(sub)}</span>` : ""}</td><td>${esc(r.work)}</td>${money}</tr>`;
+        })
         .join("") || '<tr><td colspan="8" class="empty">Hali xodim yo\'q. «＋ Xodim (oylikli)» bilan qo\'shing.</td></tr>'
     }</tbody></table></div>
-    <p class="muted" style="margin-top:8px">Oylik ishlagan soat bo'yicha: oylik ÷ oy normasi (${pay.normHours} soat) × ishlagan soat. Haydovchi: yetkazish pulidan komissiyadan keyingi qismi + tasdiqlangan reklama bonusi. Usta: to'langan ishlardagi ulushi.</p>
+    <p class="muted" style="margin-top:8px">Oylik ishlagan soat bo'yicha: oylik ÷ oy normasi (${pay.normHours} soat) × ishlagan soat. Haydovchi: yetkazish pulidan komissiyadan keyingi qismi + tasdiqlangan reklama bonusi. Usta: to'langan ishlardagi ulushi. Adminlar: ${state.info.admins} ta (deploy sozlamasida).</p>
     <div style="margin-top:16px"></div>
     ${
       apps.length
@@ -2166,10 +2194,6 @@ views.staff = async (page, tools) => {
         : ""
     }
     <div class="grid cols-2">
-      <div class="card"><h3>Xodimlar (${staff.length})</h3><ul class="list">${
-        staff.map((m) => `<li ${m.role === "driver" ? `data-driver="${m.id}" style="cursor:pointer"` : ""}><span><b>${esc(m.name)}</b>${m.username ? ` <span class="muted">@${esc(m.username)}</span>` : ""}<br><span class="muted">${m.role === "driver" ? `Haydovchi · ${DRIVER_TRUST(m)}` : "Omborchi"} · qo'shilgan ${when(m.addedAt)}</span></span><button class="btn btn--ghost" data-remove="${m.id}" data-name="${esc(m.name)}">O'chirish</button></li>`).join("") ||
-        '<li class="muted">Hali xodim yo\'q</li>'
-      }</ul><p class="muted" style="margin-top:10px">Adminlar: ${state.info.admins} ta (deploy sozlamasida).</p></div>
       <div class="card"><h3>Ombor ekranlari (${screens.length})</h3><ul class="list">${
         screens.map((s) => `<li><span>🖥 ${esc(s.name)}<br><span class="muted">ulangan ${when(s.createdAt)}</span></span><button class="btn btn--ghost" data-unpair="${s.id}" data-name="${esc(s.name)}">Uzish</button></li>`).join("") || '<li class="muted">Ekran ulanmagan</li>'
       }</ul><p class="muted" style="margin-top:10px">Yangi ekran ulash: mini ilovada ☰ → 🖥 Ombor ekrani → Kod olish.</p></div>
@@ -2197,21 +2221,17 @@ views.staff = async (page, tools) => {
   };
   page.onclick = async (e) => {
     const person = e.target.closest("[data-person]");
-    if (person) return personDrawer(pay.rows.find((r) => r.key === person.dataset.person));
+    if (person) return personDrawer(rows.find((r) => r.key === person.dataset.person));
     const adRow = e.target.closest("[data-ad]");
     if (adRow) return adDrawer(ads.find((r) => r.id === adRow.dataset.ad));
     const app = e.target.closest("[data-app]");
     if (app) return applicationDrawer(apps.find((a) => a.id === app.dataset.app));
     const mapp = e.target.closest("[data-mapp]");
     if (mapp) return masterApplicationDrawer(masterApps.find((a) => a.id === mapp.dataset.mapp));
-    const rm = e.target.closest("[data-remove]");
     const un = e.target.closest("[data-unpair]");
-    const drv = e.target.closest("[data-driver]");
-    if (drv && !rm) return driverDrawer(staff.find((m) => m.id === drv.dataset.driver));
-    const target = rm || un;
-    if (!target || !window.confirm(`«${target.dataset.name}» ${rm ? "o'chirilsinmi" : "uzilsinmi"}?`)) return;
+    if (!un || !window.confirm(`«${un.dataset.name}» uzilsinmi?`)) return;
     try {
-      await api(rm ? `/api/staff/${rm.dataset.remove}` : `/api/screens/${un.dataset.unpair}`, { method: "DELETE" });
+      await api(`/api/screens/${un.dataset.unpair}`, { method: "DELETE" });
       toast("Bajarildi");
       render();
     } catch (err) {
